@@ -222,7 +222,7 @@ class UserChapterProgress(Base):
 
     user = relationship("User", backref="completed_chapters")
 
-    table_args = (
+    __table_args__ = (
         UniqueConstraint("user_id", "chapter_number", name="uq_user_chapter"),
     )
 
@@ -632,7 +632,7 @@ class PrelimsPYQModel(Base):
         nullable=False,
     )
 
-    table_args = (
+    __table_args__ = (
         UniqueConstraint("year", "question_number", name="uq_pyq_year_qnum"),
         Index("idx_pyq_mapped_articles", "mapped_articles", postgresql_using="gin"),
     )
@@ -761,7 +761,7 @@ class DailyChallengeQuestionModel(Base):
         back_populates="questions",
     )
 
-    table_args = (
+    __table_args__ = (
         UniqueConstraint("challenge_id", "question_order", name="uq_challenge_question_order"),
     )
 

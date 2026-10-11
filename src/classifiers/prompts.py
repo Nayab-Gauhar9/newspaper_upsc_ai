@@ -65,13 +65,16 @@ class PrelimsFactsheetPayload(BaseModel):
 class UPSCPhDIntelligence(BaseModel):
     chapter_number: int = Field(default=0, description="Exact M. Laxmikanth 8th Edition chapter number (1-92).")
     chapter_name: str = Field(default="Constitutional Prescriptions", description="Exact chapter name as per M. Laxmikanth 8th Edition.")
-    issue_slug: str = Field(default="constitutional-governance-issue", description="Hyphenated topic slug.")
-    
+    is_existing_dossier: bool = Field(
+        default=False,
+        description="True if linked to an existing active dossier in candidate list, False if brand new."
+    )
+    issue_slug: str = Field(default="constitutional-governance-issue", description="Hyphenated topic slug. Must be identical to candidate slug if is_existing_dossier is True.")
     suggested_status: Literal["active", "resolved"] = Field(
+
         default="active",
         description="Must be 'resolved' ONLY IF this development represents a final landmark verdict, Presidential assent, or definitive closure; otherwise 'active'."
     )
-
     headline: str = Field(default="", description="Academic, exam-oriented headline capturing the constitutional crux.")
     theoretical_and_constitutional_context: str = Field(
         default="",
@@ -93,8 +96,6 @@ class UPSCPhDIntelligence(BaseModel):
             "way_forward_reforms": ""
         }
     )
-    
-    # Dual-Engine: Prelims event facts + Master Factsheet additions
     prelims_event_facts: PrelimsEventFactsPayload = Field(default_factory=PrelimsEventFactsPayload)
     prelims_factsheet: PrelimsFactsheetPayload = Field(default_factory=PrelimsFactsheetPayload)
 
@@ -148,7 +149,7 @@ class UPSCPhDIntelligence(BaseModel):
         return data
 
 
-# --- Enforced System Prompt with Prelims + Mains Dual Engine ---
+# --- System & User Prompts ---
 
 PHD_UPSC_SYSTEM_PROMPT = """You are a senior UPSC CSE GS-II Mains Chief Evaluator and Prelims Question Setter holding a Doctorate in Constitutional Law.
 Your analytical posture is rigorous, strictly neutral, dialectical, and factually grounded.
@@ -179,7 +180,8 @@ You must respond ONLY with valid JSON conforming EXACTLY to this schema:
 {
   "chapter_number": <int from 1 to 92>,
   "chapter_name": "<Exact M. Laxmikanth 8th Edition chapter name from the list above>",
-  "issue_slug": "<lowercase-hyphenated-slug-e.g-election-laws-disenfranchisement>",
+  "is_existing_dossier": <true | false>,
+  "issue_slug": "<lowercase-hyphenated-slug>",
   "suggested_status": "<active | resolved>",
   "headline": "<Academic, exam-oriented headline capturing the constitutional crux>",
   "theoretical_and_constitutional_context": "<1-2 sentences framing the issue through political theory and specific Articles>",
@@ -250,8 +252,9 @@ EXISTING ACTIVE DOSSIERS IN THIS CHAPTER:
 
 CRITICAL SLUG & EVOLUTION RULE:
 1. Examine the existing active dossiers listed above.
-2. If this article is a follow-up, new hearing, counter-affidavit, or direct continuation of an existing dossier, you MUST REUSE ITS EXACT "issue_slug". In "executive_synthesis", synthesize the cumulative timeline evolution rather than treating it as an isolated event.
-3. Only invent a new "issue_slug" if this is a completely separate constitutional/statutory issue.
+2. AGGRESSIVE DEDUPLICATION: If this article reports on the SAME ongoing dispute, High Court/Supreme Court proceeding, controversy, or policy development (even if covering a different phase, newer hearing, notice, or reaction from another publication), you MUST set "is_existing_dossier": true and REUSE THE EXACT "issue_slug" from the candidates list.
+3. DO NOT invent a slightly different slug for updates or parallel reporting of the same event.
+4. Only set "is_existing_dossier": false if this article addresses a fundamentally distinct legal issue or entirely different state/institution.
 
 Article Text:
 {text}
