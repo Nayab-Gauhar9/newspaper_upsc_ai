@@ -1,12 +1,12 @@
 import uuid
 from datetime import datetime, date
-
+from sqlalchemy import Boolean, Index
 from sqlalchemy import DateTime, Integer, String, Text, UUID, ForeignKey, UniqueConstraint, func, Date
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from src.database.base import Base
-
+from typing import Optional
 
 class IngestionRun(Base):
     __tablename__ = "ingestion_runs"
@@ -549,4 +549,235 @@ class ConstitutionalArticleModel(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+class PrelimsPYQModel(Base):
+    """Represents historical UPSC GS Prelims questions mapped to Laxmikanth taxonomy and Constitutional Articles."""
+    __tablename__ = "prelims_pyqs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    year: Mapped[int] = mapped_column(
+        Integer,
+        index=True,
+        nullable=False,
+    )
+
+    question_number: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    question_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    # Options structure: {"A": "...", "B": "...", "C": "...", "D": "..."}
+    options: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+
+    correct_option: Mapped[str] = mapped_column(
+        String(2),
+        nullable=False,  # e.g., 'A', 'B', 'C', 'D'
+    )
+
+    # Taxonomy Mapping (Laxmikanth 8th Edition: 1 to 92)
+    chapter_number: Mapped[int] = mapped_column(
+        Integer,
+        index=True,
+        nullable=False,
+    )
+
+    chapter_name: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False,
+    )
+
+    # Constitutional Article Mapping (array of integer article numbers 1-395)
+    # Allows fast retrieval for: WHERE 13 = ANY(mapped_articles)
+    mapped_articles: Mapped[list[int]] = mapped_column(
+        ARRAY(Integer),
+        default=list,
+        server_default="{}",
+        nullable=False,
+    )
+
+    explanation: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    difficulty_level: Mapped[str | None] = mapped_column(
+        String(20),
+        default="Moderate",
+        nullable=True,  # "Easy", "Moderate", "Tough"
+    )
+
+    is_conceptual: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    table_args = (
+        UniqueConstraint("year", "question_number", name="uq_pyq_year_qnum"),
+        Index("idx_pyq_mapped_articles", "mapped_articles", postgresql_using="gin"),
+    )
+
+class DailyChallengeModel(Base):
+    """Represents a daily static Prelims drill set consisting of 15 curated MCQs."""
+    __tablename__ = "daily_challenges"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    challenge_date: Mapped[date] = mapped_column(
+        Date,
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(255),
+        default="Daily Static Polity Prelims Drill",
+        nullable=False,
+    )
+
+    total_questions: Mapped[int] = mapped_column(
+        Integer,
+        default=15,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # 1-to-many relationship with questions ordered sequentially
+    questions: Mapped[list["DailyChallengeQuestionModel"]] = relationship(
+        back_populates="challenge",
+        cascade="all, delete-orphan",
+        order_by="DailyChallengeQuestionModel.question_order.asc()",
+    )
+
+
+class DailyChallengeQuestionModel(Base):
+    """Represents an individual MCQ within a Daily Challenge set."""
+    __tablename__ = "daily_challenge_questions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    challenge_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("daily_challenges.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    question_order: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,  # 1 to 15
+    )
+
+    archetype: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,  # 'Pairing', 'Conceptual & Theory', 'Institutional Mechanics', etc.
+    )
+
+    theme: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,  # e.g., 'Emergency Provisions', 'Money Bills'
+    )
+
+    primary_article_ref: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,  # e.g., 'Article 356'
+    )
+
+    question_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    # Statements list for pairing or multi-statement format: ["1. ...", "2. ..."]
+    statements: Mapped[list[str] | None] = mapped_column(
+        JSONB,
+        default=list,
+        nullable=True,
+    )
+
+    # Options structure: {"A": "...", "B": "...", "C": "...", "D": "..."}
+    options: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+
+    correct_option: Mapped[str] = mapped_column(
+        String(2),
+        nullable=False,  # 'A', 'B', 'C', 'D'
+    )
+
+    explanation: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    fingerprint: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+
+    traps_analyzed: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    challenge: Mapped["DailyChallengeModel"] = relationship(
+        back_populates="questions",
+    )
+
+    table_args = (
+        UniqueConstraint("challenge_id", "question_order", name="uq_challenge_question_order"),
+    )
+
+class QuestionReport(Base):
+    __tablename__ = "question_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    drill_date: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
+    question_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    question_text: Mapped[str] = mapped_column(Text, nullable=False)
+    issue_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), 
+        default=datetime.utcnow, 
+        nullable=False
     )
