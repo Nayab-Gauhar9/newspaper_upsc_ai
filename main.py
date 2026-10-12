@@ -6,6 +6,7 @@ from src.api.articles import router as articles_router
 from src.api.pyqs import router as pyqs_router
 from src.api.daily_challenge import router as daily_challenge_router
 from src.api.qreport import router as qreport_router
+from src.api.daily_press import router as daily_press_router
 app = FastAPI(
     title="UPSC Polity Living Dossiers API",
     description="Multi-source evolving current affairs graph backend for GS-II Mains",
@@ -27,7 +28,7 @@ app.include_router(articles_router)
 app.include_router(pyqs_router)
 app.include_router(daily_challenge_router, prefix="/api/v1")
 app.include_router(qreport_router)
-
+app.include_router(daily_press_router)
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
