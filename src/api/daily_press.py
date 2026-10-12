@@ -10,6 +10,17 @@ storage = NewspaperStorage()
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+PUBLICATION_DISPLAY_MAP = {
+    "indian_express": "INDIAN EXPRESS",
+    "the_hindu": "THE HINDU",
+}
+
+def format_publication(pub: Optional[str]) -> str:
+    if not pub:
+        return ""
+    cleaned = pub.strip().lower()
+    return PUBLICATION_DISPLAY_MAP.get(cleaned, cleaned.replace("_", " ").upper())
+
 # ------------------------------------------------------------------------------
 # Redis Cache Setup (with graceful in-memory fallback)
 # ------------------------------------------------------------------------------
@@ -77,7 +88,6 @@ def get_daily_smart_notes(
     # 1. Check Cache
     cached_data = get_cache(cache_key)
     if cached_data:
-        # Client-side caching header
         response.headers["Cache-Control"] = "public, max-age=300"
         response.headers["X-Cache"] = "HIT"
         return cached_data
@@ -101,14 +111,18 @@ def get_daily_smart_notes(
         if not note:
             continue
 
-        pub = note.get("publication", "")
+        raw_pub = note.get("publication", "")
         cat = note.get("category", "")
 
-        if pub == "the_hindu" and cat == "national":
+        # Normalize publication for UI display while keeping raw value accessible
+        note["publication_raw"] = raw_pub
+        note["publication"] = format_publication(raw_pub)
+
+        if raw_pub == "the_hindu" and cat == "national":
             the_hindu_national.append(note)
-        elif pub == "the_hindu":
+        elif raw_pub == "the_hindu":
             the_hindu_opinion.append(note)
-        elif pub == "indian_express":
+        elif raw_pub == "indian_express":
             indian_express_articles.append(note)
 
     total_count = (
@@ -119,7 +133,6 @@ def get_daily_smart_notes(
 
     result = {
         "status": "success",
-
         "date": query_date,
         "counts": {
             "total": total_count,
@@ -135,8 +148,6 @@ def get_daily_smart_notes(
     }
 
     # 3. Store in Cache
-    # If it's a past date, cache for 24 hours (86400s) since historical data won't change.
-    # If it's today's date, cache for 5 minutes (300s) to catch fresh morning syntheses.
     ttl = 300 if query_date == today_ist else 86400
     set_cache(cache_key, result, ttl_seconds=ttl)
 
@@ -168,8 +179,12 @@ def get_single_daily_note(
         if key.endswith(target_file) and "/smart_notes/" in key:
             payload = storage.get_json(key)
             if payload:
+                # Format publication label
+                raw_pub = payload.get("publication", "")
+                payload["publication_raw"] = raw_pub
+                payload["publication"] = format_publication(raw_pub)
+
                 result = {"status": "success", "note": payload}
-                # A synthesized note never changes: cache for 24 hours
                 set_cache(cache_key, result, ttl_seconds=86400)
                 response.headers["Cache-Control"] = "public, max-age=86400"
                 response.headers["X-Cache"] = "MISS"

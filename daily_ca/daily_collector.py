@@ -1,5 +1,5 @@
 import time
-from datetime import datetime, timedelta, timezone, now
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import urllib.request
 import feedparser
@@ -77,7 +77,7 @@ def parse_feed_date(entry) -> tuple[str, str]:
             return d_str, d_str.replace("-", "")
 
     now_ist = datetime.now(IST)
-    return now.strftime("%Y-%m-%d"), now.strftime("%Y%m%d")
+    return now_ist.strftime("%Y-%m-%d"), now_ist.strftime("%Y%m%d")
 
 
 def fetch_html(url: str) -> str:
