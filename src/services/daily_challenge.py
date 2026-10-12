@@ -197,10 +197,13 @@ CRITICAL CONSTITUTIONAL AXIOMS (FACTUAL INTEGRITY MANDATORY):
    - For Multi-statement archetypes: "options" must strictly be combinations like: "A": "1 only", "B": "2 only", "C": "Both 1 and 2", "D": "Neither 1 nor 2".
    - Self-contained: Every concept or statement referenced must be fully spelled out in statements or question.
    - For Pairing/Count archetypes, ensure you provide exactly 3 or 4 statements if options include "All three" or "All four".
+   - For Multi-statement statement selection, options text must strictly follow the concise format: '1 only', '2 only', '1 and 2 only', 'Neither 1 nor 2' (avoid verbose phrasing like 'Only statement 1 is correct').
 4. PARLIAMENTARY MOTIONS:
    - No-Confidence Motion (Rule 198): Lok Sabha ONLY, requires support of at least 50 members, no specific reasons/grounds need to be cited.
    - Censure Motion: Lok Sabha ONLY (Council of Ministers is collectively responsible only to LS under Art 75(3)), specific reasons/charges MUST be stated, NO 50-member threshold requirement.
    - Adjournment Motion: Lok Sabha ONLY, requires support of 50 members, pinpoints an urgent matter of public importance with serious administrative failure.
+5. FUNDAMENTAL DUTIES (Art 51A):
+   - Fundamental Duties are NOT self-executing. However, multiple existing penal and statutory laws enforce them indirectly (e.g., Prevention of Insults to National Honour Act 1971, Wildlife Protection Act 1972, RPA 1951, IPC provisions, Forest Conservation Act). Never state or imply that no statutes exist to enforce them.
 OUTPUT FORMAT (Valid JSON only):
 {
   "archetype": "Pairing / Conceptual & Theory / Multi-Statement / Assertion-Reason / Institutional Mechanics",
@@ -218,22 +221,42 @@ OUTPUT FORMAT (Valid JSON only):
 
 def _normalize_mcq_data(data: dict) -> dict:
     """Standardizes JSON output across varying LLM responses."""
+    # 1. Clean Archetype
+    raw_archetype = str(data.get("archetype", "")).strip()
+    if "Pairing" in raw_archetype or "Count" in raw_archetype:
+        data["archetype"] = "Pairing"
+    elif "Conceptual" in raw_archetype or "Theory" in raw_archetype:
+        data["archetype"] = "Conceptual & Theory"
+    elif "Statement" in raw_archetype:
+        data["archetype"] = "Multi-Statement"
+    elif "Assertion" in raw_archetype:
+        data["archetype"] = "Assertion-Reason"
+    elif "Institutional" in raw_archetype:
+        data["archetype"] = "Institutional Mechanics"
+    else:
+        data["archetype"] = "Multi-Statement"
+
+    # 2. Clean Correct Option
     if "correct_option" not in data:
         for k in ["correct_answer", "answer", "correctOption", "correct"]:
             if k in data:
                 val = str(data.pop(k)).strip().upper()
                 data["correct_option"] = val[0] if val else "A"
                 break
+    if data.get("correct_option") not in ["A", "B", "C", "D"]:
+        data["correct_option"] = "A"
+
+    # 3. Clean Explanation
     if "explanation" not in data:
         for k in ["solution", "rationale", "analysis", "reason"]:
             if k in data:
                 data["explanation"] = str(data.pop(k))
                 break
-    if "correct_option" not in data:
-        data["correct_option"] = "A"
-    if "explanation" not in data:
+    if "explanation" not in data or not data["explanation"]:
         data["explanation"] = "No explanation provided."
+
     return data
+
 
 
 async def generate_single_mcq_with_retry(

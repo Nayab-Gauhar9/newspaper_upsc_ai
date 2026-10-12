@@ -13,6 +13,7 @@ class DailyChallengeItem(BaseModel):
     id: int = Field(ge=1, description="Question number index")
     archetype: Literal[
         "Pairing",
+        "Pairing / Count",
         "Conceptual & Theory",
         "Multi-Statement",
         "Assertion-Reason",
