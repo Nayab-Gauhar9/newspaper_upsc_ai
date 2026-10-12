@@ -2,6 +2,7 @@ import os
 import re
 import hashlib
 from urllib.parse import urlparse, urlunparse
+from typing import Optional
 import redis
 from dotenv import load_dotenv
 
@@ -19,20 +20,36 @@ SOURCE_PREFIX_MAP = {
 
 
 class DeduplicationManager:
-    def __init__(self, namespace: str = "newspaper:"):
-        """
-        Initializes Redis connection and namespaces the tracking sets.
-        - Legacy pipeline uses: 'newspaper:' -> 'newspaper:seen_urls', 'newspaper:seen_titles'
-        - New daily pipeline uses: 'daily_press:' -> 'daily_press:seen_urls', 'daily_press:seen_titles'
-        """
-        host = os.getenv("REDIS_HOST", "127.0.0.1")
-        port = int(os.getenv("REDIS_PORT", "6380"))
-        db = int(os.getenv("REDIS_DB", "0"))
+    def __init__(self, namespace: Optional[str] = "newspaper"):
+        self.namespace = namespace or "newspaper"
+        
+        redis_url = os.getenv("REDIS_URL")
+        try:
+            if redis_url:
+                self.r = redis.from_url(
+                    redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                    protocol=2,
+                )
+            else:
+                host = os.getenv("REDIS_HOST", "127.0.0.1")
+                port = int(os.getenv("REDIS_PORT", "6379"))
+                db = int(os.getenv("REDIS_DB", "0"))
+                self.r = redis.Redis(
+                    host=host,
+                    port=port,
+                    db=db,
+                    decode_responses=True,
+                    socket_connect_timeout=1,
+                    protocol=2,
+                )
+        except Exception as e:
+            print(f"[WARN] Failed to initialize Redis in DeduplicationManager: {e}")
+            self.r = None
 
-        self.r = redis.Redis(host=host, port=port, db=db, decode_responses=True)
-        self.namespace = namespace.rstrip(":") + ":"
-        self.url_set_key = f"{self.namespace}seen_urls"
-        self.title_set_key = f"{self.namespace}seen_titles"
+        self.url_set_key = f"{self.namespace}:seen_urls"
+        self.title_set_key = f"{self.namespace}:seen_titles"
 
     @staticmethod
     def canonicalize_url(raw_url: str) -> str:
@@ -54,9 +71,12 @@ class DeduplicationManager:
 
     def is_duplicate(self, raw_url: str, raw_title: str) -> tuple[bool, str]:
         """
-        Checks Redis for duplicate URL or title under the active namespace.
+        Checks Redis for duplicate URL or title.
         Returns (is_duplicate: bool, reason: str).
         """
+        if not self.r:
+            return False, ""
+
         clean_url = self.canonicalize_url(raw_url)
         normalized_title = self.normalize_title(raw_title)
 
@@ -74,6 +94,9 @@ class DeduplicationManager:
 
     def mark_as_seen(self, raw_url: str, raw_title: str):
         """Records the canonical URL and normalized title into Redis sets."""
+        if not self.r:
+            return
+
         clean_url = self.canonicalize_url(raw_url)
         normalized_title = self.normalize_title(raw_title)
 

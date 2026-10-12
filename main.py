@@ -29,7 +29,9 @@ app.include_router(pyqs_router)
 app.include_router(daily_challenge_router, prefix="/api/v1")
 app.include_router(qreport_router)
 app.include_router(daily_press_router)
-@app.get("/health")
+
+
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "ok"}
 

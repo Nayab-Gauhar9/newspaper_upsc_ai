@@ -14,17 +14,31 @@ from src.database.models import ConstitutionalArticleModel, IssueDossierModel
 router = APIRouter(prefix="/api/v1/articles", tags=["Constitutional Articles"])
 
 # --- Redis Client Setup ---
-REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6380))
-REDIS_DB = int(os.getenv("REDIS_DB", 0))
+REDIS_URL = os.getenv("REDIS_URL")
 
-redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    db=REDIS_DB,
-    decode_responses=True,
-    protocol=2
-)
+try:
+    if REDIS_URL:
+        redis_client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            protocol=2,
+        )
+    else:
+        REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+        REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+        REDIS_DB = int(os.getenv("REDIS_DB", 0))
+        redis_client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            db=REDIS_DB,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            protocol=2,
+        )
+except Exception as e:
+    print(f"[!] Redis initialization warning: {e}")
+    redis_client = None
 
 # 90 days TTL (3 months)
 TTL_90_DAYS = 90 * 24 * 60 * 60
