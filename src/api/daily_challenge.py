@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional, List, Any, Dict
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session, selectinload
@@ -10,6 +10,9 @@ from src.services.daily_challenge import get_or_create_daily_challenge
 
 router = APIRouter(prefix="/daily-challenge", tags=["Daily Challenge"])
 
+IST = timezone(timedelta(hours=5, minutes=30))
+def get_current_ist_date() -> date:
+    return datetime.now(IST).date()
 
 @router.get("/today")
 async def get_today_daily_challenge(
@@ -24,7 +27,7 @@ async def get_today_daily_challenge(
     If not already in the DB, triggers LLM generation and persists it.
     Returns payload structured directly for FlutterFlow consumption.
     """
-    drill_date = target_date or date.today()
+    drill_date = target_date or get_current_ist_date()
 
     try:
         challenge = await get_or_create_daily_challenge(session=db, target_date=drill_date)
