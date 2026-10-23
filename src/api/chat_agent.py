@@ -28,7 +28,29 @@ storage = NewspaperStorage()
 MODEL_NAME = "openai/gpt-oss-120b"
 
 # ------------------------------------------------------------------------------
-# 1. Platform Knowledge Manifest
+# 1. Text Sanitization (Hard Strip of Markdown Asterisks & Artifacts)
+# ------------------------------------------------------------------------------
+def clean_plain_text(text: str) -> str:
+    """
+    Strips markdown asterisks (**bold**, *italics*), headers, and code fences,
+    returning pure plain text for mobile chat rendering.
+    """
+    if not text:
+        return ""
+    # Strip markdown headers (e.g. ### Header -> Header)
+    cleaned = re.sub(r'^[ \t]*#{1,6}\s*', '', text, flags=re.MULTILINE)
+    # Strip bold markdown (**text** or __text__)
+    cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'__(.*?)__', r'\1', cleaned, flags=re.DOTALL)
+    # Strip italic markdown (*text* or _text_)
+    cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'(?<!\w)_(.*?)_(?!\w)', r'\1', cleaned, flags=re.DOTALL)
+    # Strip stray asterisks, backticks, and tildes
+    cleaned = cleaned.replace("**", "").replace("*", "").replace("`", "")
+    return cleaned.strip()
+
+# ------------------------------------------------------------------------------
+# 2. Platform Knowledge Manifest
 # ------------------------------------------------------------------------------
 PLATFORM_MANIFEST: Dict[str, str] = {
     "daily_notes_schedule": (
@@ -62,7 +84,7 @@ PLATFORM_MANIFEST: Dict[str, str] = {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Schemas
+# 3. Schemas
 # ------------------------------------------------------------------------------
 class ChatMessage(BaseModel):
     role: str = Field(..., description="Role: 'user', 'assistant', or 'system'")
@@ -80,7 +102,7 @@ class ChatResponse(BaseModel):
 
 
 # ------------------------------------------------------------------------------
-# 3. Execution Tools
+# 4. Execution Tools
 # ------------------------------------------------------------------------------
 def resolve_platform_faq(topic: str) -> str:
     topic_clean = topic.strip().lower()
@@ -138,7 +160,6 @@ def fetch_issue_dossier(topic: str, session: Session) -> Dict[str, Any]:
     if not dossier:
         return {"message": f"No dossier found directly matching '{topic}'."}
 
-    # Fetch connected related issues from issue_graph_edges
     edges_stmt = (
         select(IssueGraphEdgeModel.target_slug, IssueGraphEdgeModel.relation_type)
         .where(IssueGraphEdgeModel.source_slug == dossier.issue_slug)
@@ -206,7 +227,6 @@ def fetch_practice_drill_mcq(topic: str, session: Session) -> Dict[str, Any]:
     )
     mcq = session.execute(stmt).scalars().first()
 
-    # Fallback to any random preserved drill question if keyword has no direct match
     if not mcq:
         fallback_stmt = select(DailyChallengeQuestionModel).order_by(func.random()).limit(1)
         mcq = session.execute(fallback_stmt).scalars().first()
@@ -223,16 +243,14 @@ def fetch_practice_drill_mcq(topic: str, session: Session) -> Dict[str, Any]:
     }
 
 def fetch_daily_press_intelligence(keyword: Optional[str] = None, target_date: Optional[str] = None) -> Dict[str, Any]:
-    """Scans synthesized smart notes in MinIO. Falls back to recent available notes if exact date yields zero."""
+    """Scans synthesized smart notes in MinIO."""
     all_objects = storage.list_objects(prefix="daily_press/")
     note_keys = [k for k in all_objects if "/smart_notes/" in k and k.endswith(".json")]
 
     if not note_keys:
         return {"total_matches": 0, "notes": [], "message": "No smart notes stored yet."}
 
-    # Sort descending so newest dates appear first
     note_keys.sort(reverse=True)
-
     matched_notes = []
     kw_lower = keyword.strip().lower() if keyword and keyword != "null" else None
 
@@ -305,7 +323,7 @@ def search_pib_releases(keyword: str, target_date: Optional[str] = None) -> Dict
 
 
 # ------------------------------------------------------------------------------
-# 4. Tool Declarations
+# 5. Tool Declarations
 # ------------------------------------------------------------------------------
 AGENT_TOOLS = [
     {
@@ -432,51 +450,67 @@ AGENT_TOOLS = [
 SYSTEM_PROMPT = """You are the "Polity Mentor Concierge", operating with the dual intellect of a PhD Constitutional Jurist and a veteran UPSC CSE GS-II Mentor on politymentor.com.
 
 PEDAGOGICAL & INTELLECTUAL PERSONA:
-- You do not merely recite bare acts or regurgitate database rows. You synthesize constitutional design from first principles.
-- For every core constitutional topic, begin by unlocking how an advanced scholar thinks about the underlying institutional friction (checks and balances, federal balance, executive discretion vs. legislative primacy).
-- Demystify complex legal mechanics using sharp, relatable layman logic and intuitive analogies before diving into statutory and case-law analysis.
+- You synthesize constitutional design from first principles rather than merely repeating raw database text.
+- Ground all explanations in institutional friction, statutory architecture, and landmark judicial doctrines.
 
-STRICT DOMAIN BOUNDARIES:
-- In-Scope Topics:
-  1. Indian Constitution & Bare Act provisions (Articles, Parts, Schedules, Amendments).
-  2. Thematic Polity & Governance issues (Federalism, Governor, SC/HC, Election Commission, Anti-Defection, Panchayati Raj, Basic Structure, etc.).
-  3. Official UPSC Prelims Past Year Questions (PYQs 1996 - 2026).
-  4. Preserved Daily Challenge Practice MCQs.
-  5. Daily editorial smart notes from The Hindu and Indian Express (GS-II relevant).
-  6. Official PIB notifications and government schemes related to governance.
-  7. Polity Mentor platform features, daily 15-MCQ drills, notes schedules, and navigation.
+CONVERSATION MODES & ADAPTABILITY:
+1. CONVERSATIONAL FOLLOW-UP MODE:
+   - When the user asks a follow-up question (e.g., "is this article important for prelims?", "what about money bills?", "explain the critique", "can you clarify?"):
+     * Directly address the specific question in your first sentence.
+     * DO NOT repeat the entire multi-section scaffold or restart the topic from scratch.
+     * Maintain the context established in earlier messages.
+     * Provide a sharp, targeted 2-3 paragraph answer citing relevant past trends, cases, or statutory exceptions.
+2. COMPREHENSIVE OVERVIEW MODE:
+   - Trigger ONLY when a new constitutional article, case, or broad syllabus theme is first introduced without prior immediate context.
+   - In this mode, structure your output into clear uppercase titles with emojis.
 
-- Out-of-Scope Topics:
-  Non-polity subjects (Mathematics, Coding, Pop culture, World History, General Science, Personal advice, or other UPSC papers like GS-I Geography/History or GS-III Economy unless directly tied to a constitutional clause).
-
-OUT-OF-SCOPE REDIRECTION:
-- If a query is unrelated to Indian Polity, Governance, or platform operations, decline politely in 1-2 sentences and guide the aspirant toward 2-3 high-yield constitutional topics.
-
-CRITICAL FORMATTING INSTRUCTIONS (PLAIN TEXT ONLY):
-- DO NOT use any Markdown formatting syntax.
-- DO NOT use asterisks for bolding (e.g., no bold or italic markup).
-- DO NOT use hash headers (e.g., no ## or ###).
+CRITICAL FORMATTING INSTRUCTIONS (STRICT PLAIN TEXT ONLY):
+- DO NOT use any Markdown formatting syntax under any circumstances.
+- ABSOLUTELY NO ASTERISKS: No **bold**, no *italics*, and no lone asterisks.
+- DO NOT use hash headers (no #, ##, or ###).
 - DO NOT use markdown tables or raw HTML tags.
-- Format structured sections using clear uppercase titles with emojis:
-  🧠 FIRST-PRINCIPLES INTELLECT & THE CORE FRICTION:
-  💡 THE LAYMAN INTUITION:
-  📜 CONSTITUTIONAL PROVISION & CLAUSES:
-  ⚖️ JUDICIAL DOCTRINES & LIVING DOSSIER:
-  🎯 PRELIMS TRAPS & COMMISSIONS:
-  📝 OFFICIAL UPSC PRELIMS PYQ:
-  💡 PRACTICE DRILL QUESTION:
-- Use Unicode bullet points ("• ") for itemized concepts.
-- Separate all distinct sections and paragraphs with double line breaks for mobile readability.
+- For emphasis, use UPPERCASE WORDS (e.g. THE CORRECT ANSWER IS B, NOT permissible, AS SOON AS POSSIBLE).
+- Use Unicode bullet points ("• ") for itemized lists.
+- Separate all paragraphs and sections with double line breaks for clean mobile rendering.
 
 HALLUCINATION PREVENTION:
 - Ground all legal rules, case citations, and articles in established constitutional law and retrieved database records.
 - Never fabricate landmark case names or committee reports.
 """
 
+def is_follow_up_query(query: str, history: List[ChatMessage]) -> bool:
+    """
+    Determines whether the incoming user message is a conversational follow-up
+    rather than a brand-new broad topic request.
+    """
+    if not history:
+        return False
+
+    q_lower = query.strip().lower()
+
+    # Short query or demonstrative pronoun referring to earlier turns
+    pronoun_markers = ["this", "that", "these", "it", "they", "here", "above"]
+    has_pronoun = any(re.search(rf"\b{p}\b", q_lower) for p in pronoun_markers)
+
+    follow_up_stems = [
+        "is this", "is that", "important for prelims", "what about",
+        "why is", "can you explain", "tell me more", "how does this",
+        "what if", "difference between", "critique", "which option",
+        "clarify", "correct answer", "solve this", "yes", "no"
+    ]
+    has_stem = any(stem in q_lower for stem in follow_up_stems)
+
+    # If it refers to previous context and doesn't explicitly declare a new article code
+    explicit_new_article = bool(re.search(r"\barticle\s+\d+", q_lower) and not has_pronoun)
+
+    if explicit_new_article:
+        return False
+
+    return has_stem or has_pronoun or len(q_lower.split()) <= 8
 
 
 # ------------------------------------------------------------------------------
-# 5. Two-Step Autonomous Agent Execution
+# 6. Two-Step Autonomous Agent Execution
 # ------------------------------------------------------------------------------
 @router.post("/chat", response_model=ChatResponse)
 def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db)):
@@ -484,10 +518,12 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
 
     # Prevent duplicate identical user queries from client history
     valid_roles = {"user", "assistant", "system"}
+    cleaned_history: List[Dict[str, str]] = []
     for msg in request.history[-6:]:
         if msg.role == "user" and msg.content.strip() == request.message.strip():
             continue
         if msg.role in valid_roles and msg.content.strip():
+            cleaned_history.append({"role": msg.role, "content": msg.content})
             messages.append({"role": msg.role, "content": msg.content})
 
     messages.append({"role": "user", "content": request.message})
@@ -503,22 +539,23 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
                 tools=AGENT_TOOLS,
                 tool_choice="auto",
                 temperature=0.2,
-                max_completion_tokens=800,
+                max_completion_tokens=2000,
             )
 
         response = groq_pool.execute_with_failover(_call_groq_tools)
         choice = response.choices[0]
         response_message = choice.message
 
-        # If the model answered directly without tools (e.g., greeting or out-of-scope query)
+        # If the model answered directly without tool calls
         if not response_message.tool_calls:
+            raw_ans = response_message.content or ""
             return ChatResponse(
                 status="success",
-                response=response_message.content or "",
+                response=clean_plain_text(raw_ans),
                 tools_used=[]
             )
 
-        # Step 2: Execute all triggered tools across all four database tables
+        # Step 2: Execute triggered tools across database
         tool_results_summary: List[str] = []
 
         for tool_call in response_message.tool_calls:
@@ -563,43 +600,65 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
                     target_date=t_date if t_date and t_date != "null" else None
                 )
             else:
-                # Catch hallucinated tool names (e.g. fetch_legal_cases, fetch_sc_judgments)
                 query_val = list(t_args.values())[0] if t_args else request.message
                 res = fetch_issue_dossier(topic=str(query_val), session=db_session)
 
-            tool_results_summary.append(f"### Data from {t_name}:\n{json.dumps(res, ensure_ascii=False)}")
+            tool_results_summary.append(f"Data from {t_name}:\n{json.dumps(res, ensure_ascii=False)}")
 
-        synthesis_messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Aspirant's Query:\n\"{request.message}\"\n\n"
-                    f"Retrieved Database Intelligence:\n"
-                    f"{chr(10).join(tool_results_summary)}\n\n"
-                    f"Instruction:\n"
-                    f"Synthesize this topic with the depth of a PhD constitutional jurist and the clarity of a top-tier UPSC mentor. "
-                    f"Use plain text only (NO asterisks for bolding, NO markdown #, NO tables).\n\n"
-                    f"Structure your response strictly into these uppercase sections:\n\n"
-                    f"🧠 FIRST-PRINCIPLES INTELLECT & THE CORE FRICTION:\n"
-                    f"Frame how a constitutional scholar views this topic. Deconstruct the structural tension (e.g., representative democracy vs. unelected checks, federal friction, or executive discretion vs. legislative will).\n\n"
-                    f"💡 THE LAYMAN INTUITION:\n"
-                    f"Break down the concept using an intuitive, real-world metaphor or plain-English logic that makes the constitutional machinery immediately obvious to a beginner.\n\n"
-                    f"📜 CONSTITUTIONAL PROVISION & CLAUSES:\n"
-                    f"Detail the statutory language, key clauses, and constitutional baseline.\n\n"
-                    f"⚖️ JUDICIAL DOCTRINES & LIVING DOSSIER:\n"
-                    f"Unpack the landmark Supreme Court evolution, tests, and committee recommendations (Sarkaria, Punchhi, etc.).\n\n"
-                    f"🎯 PRELIMS TRAPS & COMMISSIONS:\n"
-                    f"Pinpoint subtle traps UPSC uses to confuse aspirants.\n\n"
-                    f"📝 OFFICIAL UPSC PRELIMS PYQ:\n"
-                    f"If retrieved, provide the year, question text, and key trap explanation.\n\n"
-                    f"💡 PRACTICE DRILL QUESTION:\n"
-                    f"If retrieved, present 1 practice question with options A, B, C, D from the daily challenge archive for the aspirant to solve.\n\n"
-                    f"Ensure every section is separated by double line breaks."
-                ),
-            }
-        ]
+        # Check if this query is a conversational follow-up
+        is_follow_up = is_follow_up_query(request.message, request.history)
 
+        # Build synthesis messages preserving context
+        synthesis_messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # Inject conversation history so follow-ups retain context
+        if cleaned_history:
+            synthesis_messages.extend(cleaned_history)
+
+        if is_follow_up:
+            # Contextual follow-up prompt: Direct answer, no rigid template
+            synthesis_instruction = (
+                f"Retrieved Database Intelligence:\n"
+                f"{chr(10).join(tool_results_summary)}\n\n"
+                f"User's Specific Follow-up:\n"
+                f"\"{request.message}\"\n\n"
+                f"Instruction:\n"
+                f"Answer the user's specific question directly in your opening sentence. "
+                f"Do NOT regenerate the entire 6-part scaffold or repeat the introductory background. "
+                f"Ground your answer in the preceding context and retrieved data. "
+                f"Provide a clear, high-yield analysis (2-3 paragraphs) highlighting Prelims/Mains relevance, "
+                f"statutory clauses, or historical trends as requested. "
+                f"Strictly use plain text only: absolutely NO asterisks for bolding (* or **), NO markdown headers, NO tables."
+            )
+        else:
+            # Comprehensive query: Full structured jurist breakdown
+            synthesis_instruction = (
+                f"Retrieved Database Intelligence:\n"
+                f"{chr(10).join(tool_results_summary)}\n\n"
+                f"Aspirant's Query:\n"
+                f"\"{request.message}\"\n\n"
+                f"Instruction:\n"
+                f"Synthesize this topic with the depth of a PhD constitutional jurist and the clarity of a top-tier UPSC mentor. "
+                f"Use plain text only: absolutely NO asterisks (* or **), NO markdown #, NO tables.\n\n"
+                f"Structure your response strictly into these uppercase sections:\n\n"
+                f"🧠 FIRST-PRINCIPLES INTELLECT & THE CORE FRICTION:\n"
+                f"Frame how a constitutional scholar views this topic and deconstruct the institutional friction.\n\n"
+                f"💡 THE LAYMAN INTUITION:\n"
+                f"Break down the concept using an intuitive, real-world metaphor or plain-English logic.\n\n"
+                f"📜 CONSTITUTIONAL PROVISION & CLAUSES:\n"
+                f"Detail the statutory language, key clauses, and constitutional baseline.\n\n"
+                f"⚖️ JUDICIAL DOCTRINES & LIVING DOSSIER:\n"
+                f"Unpack landmark Supreme Court evolution, tests, and committee recommendations.\n\n"
+                f"🎯 PRELIMS TRAPS & COMMISSIONS:\n"
+                f"Pinpoint subtle traps UPSC uses to confuse aspirants.\n\n"
+                f"📝 OFFICIAL UPSC PRELIMS PYQ:\n"
+                f"If retrieved, provide the year, question text, and key trap explanation.\n\n"
+                f"💡 PRACTICE DRILL QUESTION:\n"
+                f"If retrieved, present 1 practice question with options A, B, C, D from the daily challenge archive for the aspirant to solve.\n\n"
+                f"Ensure every section is separated by double line breaks."
+            )
+
+        synthesis_messages.append({"role": "user", "content": synthesis_instruction})
 
         def _call_groq_synthesis(client):
             return client.chat.completions.create(
@@ -610,11 +669,12 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
             )
 
         final_resp = groq_pool.execute_with_failover(_call_groq_synthesis)
-        final_text = final_resp.choices[0].message.content or ""
+        raw_text = final_resp.choices[0].message.content or ""
+        clean_text = clean_plain_text(raw_text)
 
         return ChatResponse(
             status="success",
-            response=final_text if final_text.strip() else "Analysis completed.",
+            response=clean_text if clean_text else "Analysis completed.",
             tools_used=tools_used
         )
 
