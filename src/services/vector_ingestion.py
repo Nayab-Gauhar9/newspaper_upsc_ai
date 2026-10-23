@@ -231,4 +231,4 @@ class SmartNotesVectorizer:
 
 if __name__ == "__main__":
     vectorizer = SmartNotesVectorizer(model_name="voyage-3-large")
-    vectorizer.process_smart_notes(limit=5, delay_seconds=30.0)
+    vectorizer.process_smart_notes(limit=100, delay_seconds=30.0)
