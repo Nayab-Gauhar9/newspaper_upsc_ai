@@ -298,4 +298,4 @@ class DailyPolitySynthesizer:
 
 if __name__ == "__main__":
     synthesizer = DailyPolitySynthesizer()
-    synthesizer.run_synthesis(target_date="2026-10-12", limit=None, cooldown_seconds=4)
+    synthesizer.run_synthesis(target_date="2026-10-25", limit=None, cooldown_seconds=4)

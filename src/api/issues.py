@@ -1,9 +1,15 @@
+import json
+import time
+import zoneinfo
+from collections import defaultdict
+from datetime import datetime, time as dtime, timedelta
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, or_, desc, func, text
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Response
+from sqlalchemy import select, or_, desc, func
 from sqlalchemy.orm import Session, selectinload
 
-from src.database.session import SessionLocal
+from src.database.session import SessionLocal, get_db
 from src.database.models import IssueDossierModel, IssueGraphEdgeModel
 from src.schema.issues import (
     IssueDossierSummaryOut,
@@ -11,87 +17,245 @@ from src.schema.issues import (
     GraphEdgeOut,
     PrelimsDrillItemOut,
 )
-import json
-from collections import defaultdict
-from typing import List, Optional
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from src.api.schemas import ChapterDossierGroup, DossierSummaryItem
-# Use your existing DB dependency/pool imported in issues.py
-from src.database.session import get_db
+from src.storage.redis_cache import get_redis_cache
+
 router = APIRouter(prefix="/api/issues", tags=["Topic Evolution Engine"])
 
+CACHE_TTL_2_HOURS = 7200
+CACHE_TTL_TODAY = 600  # 10 minutes TTL
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+UTC = zoneinfo.ZoneInfo("UTC")
 
-@router.get("/by-chapter", response_model=List[ChapterDossierGroup])
-def get_dossiers_grouped_by_chapter(db: Session = Depends(get_db)):
+
+def get_ist_today_utc_bounds():
+    """Calculates IST 00:00:00 to 23:59:59 converted to UTC timestamps for DB queries."""
+    now_ist = datetime.now(IST)
+    start_ist = datetime.combine(now_ist.date(), dtime.min, tzinfo=IST)
+    end_ist = datetime.combine(now_ist.date(), dtime.max, tzinfo=IST)
+    return start_ist.astimezone(UTC), end_ist.astimezone(UTC)
+
+
+def _serialize_dossier_item(d: IssueDossierModel) -> dict:
+    """Helper to safely extract model fields and nested JSON structures matching Neon schema."""
+    mains_data = d.mains_framework or {}
+    mains_hook = (
+        mains_data.get("introduction_hook")
+        if isinstance(mains_data, dict)
+        else None
+    )
+
+    factsheet_data = d.prelims_factsheet or {}
+    raw_articles = (
+        factsheet_data.get("constitutional_articles", [])
+        if isinstance(factsheet_data, dict)
+        else []
+    )
+
+    if isinstance(raw_articles, str):
+        try:
+            articles = json.loads(raw_articles)
+        except Exception:
+            articles = [raw_articles]
+    elif isinstance(raw_articles, list):
+        articles = raw_articles
+    else:
+        articles = []
+
+    return {
+        "issue_id": str(d.issue_id),
+        "issue_slug": d.issue_slug,
+        "title": d.title,
+        "status": d.status or "active",
+        "article_count": d.article_count or 1,
+        "canonical_summary": d.canonical_summary,
+        "mains_hook": mains_hook,
+        "constitutional_articles": articles,
+        "last_updated_at": (
+            d.last_updated_at.isoformat() if d.last_updated_at else None
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 1. HOMEPAGE HORIZONTAL CAROUSEL ENDPOINT
+# ─────────────────────────────────────────────────────────────
+@router.get("/updated-today", response_model=List[DossierSummaryItem])
+def get_dossiers_updated_today(
+    response: Response,
+    limit: int = Query(10, ge=1, le=30),
+    db: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
+):
     """
-    Returns all active and historical dossiers grouped by syllabus chapter
-    for the FlutterFlow ChapterDirectoryPage.
+    Returns dossiers that evolved today in IST.
+    If 0 exist today, gracefully falls back to the top 5 most recently updated dossiers.
     """
-    # 1. Query using SQLAlchemy ORM directly (no raw SQL / colon escaping issues)
+    cache_key = f"dossiers:feed:updated-today:{limit}"
+    start_time = time.perf_counter()
+
+    # 1. Check Redis Cache
+    if r_cache:
+        try:
+            cached_data = r_cache.get(cache_key)
+            if cached_data:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                print(f"\033[92m[REDIS HIT]\033[0m Key: {cache_key} ({duration_ms:.2f}ms)")
+                response.headers["X-Cache"] = "HIT"
+                response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+                return json.loads(cached_data)
+        except Exception as e:
+            print(f"\033[91m[REDIS ERROR]\033[0m Cache read failed for {cache_key}: {e}")
+
+    # 2. Query Today's Dossiers using IST bounds
+    start_utc, end_utc = get_ist_today_utc_bounds()
+
     stmt = (
         select(IssueDossierModel)
-        .order_by(IssueDossierModel.chapter_name.asc(), IssueDossierModel.last_updated_at.desc())
+        .where(
+            IssueDossierModel.last_updated_at >= start_utc,
+            IssueDossierModel.last_updated_at <= end_utc,
+        )
+        .order_by(desc(IssueDossierModel.last_updated_at))
+        .limit(limit)
+    )
+    dossiers = db.scalars(stmt).all()
+
+    # 3. Fallback to latest 5 if today has no updates
+    is_fallback = False
+    if not dossiers:
+        is_fallback = True
+        print("\033[93m[FALLBACK TRIGGERED]\033[0m 0 dossiers updated today. Fetching latest 5 recent dossiers.")
+        fallback_stmt = (
+            select(IssueDossierModel)
+            .order_by(desc(IssueDossierModel.last_updated_at))
+            .limit(5)
+        )
+        dossiers = db.scalars(fallback_stmt).all()
+
+    results = [_serialize_dossier_item(d) for d in dossiers]
+
+    # 4. Populate Redis Cache
+    if r_cache:
+        try:
+            r_cache.setex(
+                name=cache_key,
+                time=CACHE_TTL_TODAY,
+                value=json.dumps(results),
+            )
+            print(f"\033[94m[REDIS SET]\033[0m Key: {cache_key} (TTL: {CACHE_TTL_TODAY}s, Fallback: {is_fallback})")
+        except Exception as e:
+            print(f"\033[91m[REDIS ERROR]\033[0m Cache write failed for {cache_key}: {e}")
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Fallback"] = str(is_fallback).lower()
+    response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────
+# 2. BY-CHAPTER ENDPOINT (SUPPORTS 'today', 'active', 'closed')
+# ─────────────────────────────────────────────────────────────
+@router.get("/by-chapter", response_model=List[ChapterDossierGroup])
+def get_dossiers_grouped_by_chapter(
+    response: Response,
+    status_filter: Optional[str] = Query(
+        None, description="Filter by status: 'today', 'active', 'closed', 'settled', 'resolved', or None for all"
+    ),
+    db: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
+):
+    start_time = time.perf_counter()
+    normalized_status = (status_filter or "all").strip().lower()
+    cache_key = f"dossiers:by-chapter:{normalized_status}"
+
+    # 1. Attempt Redis Read
+    if r_cache:
+        try:
+            cached_data = r_cache.get(cache_key)
+            if cached_data:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                print(f"\033[92m[REDIS HIT]\033[0m Key: {cache_key} ({duration_ms:.2f}ms)")
+                response.headers["X-Cache"] = "HIT"
+                response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+                return json.loads(cached_data)
+        except Exception as e:
+            print(f"\033[91m[REDIS ERROR]\033[0m Failed reading {cache_key}: {e}")
+
+    # 2. Database Fallback (Cache Miss)
+    print(f"\033[93m[REDIS MISS]\033[0m Querying PostgreSQL for key: {cache_key}...")
+    response.headers["X-Cache"] = "MISS"
+
+    stmt = select(IssueDossierModel)
+
+    if normalized_status == "today":
+        start_utc, end_utc = get_ist_today_utc_bounds()
+        stmt = stmt.where(
+            IssueDossierModel.last_updated_at >= start_utc,
+            IssueDossierModel.last_updated_at <= end_utc,
+        )
+    elif normalized_status in ["week", "last_7_days", "weekly"]:
+        now_utc = datetime.now(UTC)
+        seven_days_ago_utc = now_utc - timedelta(days=7)
+        stmt = stmt.where(IssueDossierModel.last_updated_at >= seven_days_ago_utc)
+    elif normalized_status != "all":
+        if normalized_status in ["closed", "settled", "resolved"]:
+            stmt = stmt.where(
+                IssueDossierModel.status.in_(["closed", "settled", "resolved"])
+            )
+        else:
+            stmt = stmt.where(IssueDossierModel.status == normalized_status)
+
+    stmt = stmt.order_by(
+        IssueDossierModel.chapter_name.asc(),
+        IssueDossierModel.last_updated_at.desc(),
     )
     dossiers = db.scalars(stmt).all()
 
     if not dossiers:
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
         return []
 
-    # 2. Group records by chapter_name
+    # 3. Group records by chapter_name
     grouped_data = defaultdict(list)
     for d in dossiers:
         chapter = d.chapter_name or "General Constitutional Issues"
-        
-        # Extract fields from ORM model safely
-        mains_data = d.mains_framework or {}
-        mains_hook = mains_data.get("introduction_hook") if isinstance(mains_data, dict) else None
+        grouped_data[chapter].append(_serialize_dossier_item(d))
 
-        factsheet_data = d.prelims_factsheet or {}
-        raw_articles = factsheet_data.get("constitutional_articles", []) if isinstance(factsheet_data, dict) else []
-        
-        if isinstance(raw_articles, str):
-            try:
-                articles = json.loads(raw_articles)
-            except Exception:
-                articles = [raw_articles]
-        elif isinstance(raw_articles, list):
-            articles = raw_articles
-        else:
-            articles = []
-
-        item = DossierSummaryItem(
-            issue_id=str(d.issue_id),
-            issue_slug=d.issue_slug,
-            title=d.title,
-            status=d.status or "active",
-            article_count=d.article_count or 1,
-            mains_hook=mains_hook,
-            constitutional_articles=articles,
-            last_updated_at=d.last_updated_at.isoformat() if d.last_updated_at else None,
-        )
-        grouped_data[chapter].append(item)
-
-    return [
-        ChapterDossierGroup(
-            chapter_name=chap,
-            total_dossiers=len(items),
-            dossiers=items,
-        )
+    response_payload = [
+        {
+            "chapter_name": chap,
+            "total_dossiers": len(items),
+            "dossiers": items,
+        }
         for chap, items in grouped_data.items()
     ]
 
+    # 4. Save to Redis
+    ttl = CACHE_TTL_TODAY if normalized_status == "today" else CACHE_TTL_2_HOURS
+    if r_cache:
+        try:
+            r_cache.setex(
+                name=cache_key,
+                time=ttl,
+                value=json.dumps(response_payload),
+            )
+            print(f"\033[94m[REDIS SET]\033[0m Key: {cache_key} (TTL: {ttl}s)")
+        except Exception as e:
+            print(f"\033[91m[REDIS ERROR]\033[0m Failed saving {cache_key}: {e}")
+
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+    return response_payload
 
 
+# ─────────────────────────────────────────────────────────────
+# 3. OTHER ISSUE ENDPOINTS
+# ─────────────────────────────────────────────────────────────
 @router.get(
     "/",
     response_model=List[IssueDossierSummaryOut],
@@ -156,7 +320,7 @@ def get_prelims_drills(
         stmt = stmt.where(IssueDossierModel.chapter_name.ilike(f"%{chapter_name.strip()}%"))
 
     results = db.execute(stmt.limit(limit * 2)).all()
-    
+
     drills = []
     for edge, title, chapter in results:
         facts = edge.prelims_event_facts or {}
@@ -182,6 +346,7 @@ def get_prelims_drills(
             break
 
     return drills
+
 
 @router.get(
     "/chapters/summary",
@@ -257,55 +422,3 @@ def get_dossier_timeline(issue_slug: str, db: Session = Depends(get_db)):
                 detail=f"Issue dossier '{issue_slug}' was not found.",
             )
     return edges
-
-
-@router.get(
-    "/{issue_slug}",
-    response_model=IssueDossierDetailOut,
-    summary="Get complete topic dossier with chronological perspective matrix",
-)
-def get_dossier_detail(issue_slug: str, db: Session = Depends(get_db)):
-    """Fetches the master dossier and all connected chronological graph edges (sources, viewpoints, legal anchors)."""
-    stmt = (
-        select(IssueDossierModel)
-        .where(IssueDossierModel.issue_slug == issue_slug.strip().lower())
-        .options(selectinload(IssueDossierModel.edges))
-    )
-    dossier = db.scalars(stmt).first()
-
-    if not dossier:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Issue dossier '{issue_slug}' was not found.",
-        )
-    return dossier
-
-
-@router.get(
-    "/{issue_slug}/timeline",
-    response_model=List[GraphEdgeOut],
-    summary="Get purely chronological perspective timeline",
-)
-def get_dossier_timeline(issue_slug: str, db: Session = Depends(get_db)):
-    """Lightweight endpoint returning strictly the sequential development steps and citations for visual timelines."""
-    stmt = (
-        select(IssueGraphEdgeModel)
-        .where(IssueGraphEdgeModel.issue_slug == issue_slug.strip().lower())
-        .order_by(IssueGraphEdgeModel.event_date.asc(), IssueGraphEdgeModel.created_at.asc())
-    )
-    edges = db.scalars(stmt).all()
-
-    if not edges:
-        # Check if dossier exists at all
-        exists = db.scalar(
-            select(IssueDossierModel.issue_id).where(
-                IssueDossierModel.issue_slug == issue_slug.strip().lower()
-            )
-        )
-        if not exists:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Issue dossier '{issue_slug}' was not found.",
-            )
-    return edges
-

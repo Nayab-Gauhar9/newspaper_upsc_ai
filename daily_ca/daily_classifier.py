@@ -178,4 +178,4 @@ class DailyPolityClassifier:
 if __name__ == "__main__":
     classifier = DailyPolityClassifier()
     # Runs across all dates starting from your earliest folder in MinIO
-    classifier.run_classifier(target_date="2026-10-12", limit=None, cooldown_seconds=3)
+    classifier.run_classifier(target_date="2026-10-25", limit=None, cooldown_seconds=3)
