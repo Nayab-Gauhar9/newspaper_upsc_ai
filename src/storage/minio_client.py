@@ -6,11 +6,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from minio import Minio
 from minio.error import S3Error
-import re
-from typing import Any
+
 load_dotenv()
 
-def is_local_minio_alive(host: str = "127.0.0.1", port: int = 9000, timeout: float = 0.5) -> bool:
+
+def is_local_minio_alive(
+    host: str = "127.0.0.1", port: int = 9000, timeout: float = 0.5
+) -> bool:
     """Quick check to see if local MinIO port is accepting connections."""
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -19,15 +21,15 @@ def is_local_minio_alive(host: str = "127.0.0.1", port: int = 9000, timeout: flo
         return False
 
 
+class NewspaperStorage:
 
-class MinIOStorage:
     def __init__(self, force_r2: bool = False):
         env_mode = os.getenv("STORAGE_TARGET", "auto").lower()
         use_r2 = force_r2 or env_mode == "r2"
 
         # Check local MinIO health unless forced to R2
         if not use_r2 and is_local_minio_alive():
-            # 1. PRIMARY: Local MinIO (When laptop & Docker are active)
+            # 1. PRIMARY: Local MinIO
             access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
             secret_key = os.getenv("MINIO_SECRET_KEY", "minioadmin")
             self.client = Minio(
@@ -39,7 +41,7 @@ class MinIOStorage:
             self.bucket = os.getenv("MINIO_BUCKET_NAME", "upsc-ai")
             self.target_name = "Local MinIO"
         else:
-            # 2. FALLBACK: Cloudflare R2 (Laptop off / Render cloud / MinIO stopped)
+            # 2. FALLBACK: Cloudflare R2
             r2_endpoint = os.getenv("R2_ENDPOINT_URL")
             r2_access_key = os.getenv("R2_ACCESS_KEY_ID")
             r2_secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
@@ -64,106 +66,44 @@ class MinIOStorage:
             self.bucket = bucket_name
             self.target_name = "Cloudflare R2"
 
+        self.ensure_bucket_exists()
 
+    def ensure_bucket_exists(self):
+        try:
+            if not self.client.bucket_exists(self.bucket):
+                self.client.make_bucket(self.bucket)
+        except Exception as e:
+            print(f"[!] Warning checking bucket: {e}")
 
-
-
-    def bucket_exists(self):
-
-        return self.client.bucket_exists(
-            self.bucket
-        )
-
-    def create_bucket(self):
-
-        if not self.bucket_exists():
-
-            self.client.make_bucket(
-                self.bucket
-            )
-
-    def upload_json(self, object_name, data):
-
-        content = json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ).encode("utf-8")
-
+    def upload_json(self, object_name: str, data: dict):
+        content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         self.client.put_object(
             self.bucket,
             object_name,
             BytesIO(content),
             length=len(content),
-            content_type="application/json"
+            content_type="application/json",
         )
 
-    def upload_pib_record(self, record):
-
-        dt = datetime.fromisoformat(
-            record["published_at"]
-        )
-
-        object_name = (
-            f"pib/raw/"
-            f"{dt:%Y/%m/%d}/"
-            f"{record['english_prid']}.json"
-        )
-        if self.object_exists(object_name):
-            return object_name, False
-
-        self.upload_json(
-            object_name,
-            record
-        )
-
-        return object_name, True
-
-    def upload_classification(self, prid, classification):
-        """Store classification metadata for every processed PIB article."""
-        object_name = f"pib/classifications/{prid}.json"
-
-        if self.object_exists(object_name):
-            return object_name, False
-
-        self.upload_json(object_name, classification)
-        return object_name, True
-
-    def upload_classified_article(self, record, classification, chapter_name):
-        """Store a relevant PIB article under chapter/topic folders."""
-        topic = classification.get("topic") or "Unspecified Topic"
-
-        def safe_path_component(value):
-            value = str(value).strip()
-            value = value.replace("/", "-").replace(chr(92), "-")
-            return value or "Unspecified"
-
-        chapter_dir = safe_path_component(chapter_name)
-        topic_dir = safe_path_component(topic)
-        prid = record["english_prid"]
-
-        object_name = (
-            f"pib/classified/"
-            f"{chapter_dir}/"
-            f"{topic_dir}/"
-            f"{prid}.json"
-        )
-
-        if self.object_exists(object_name):
-            return object_name, False
-
-        data = {
-            **record,
-            "classification": {
-                **classification,
-                "chapter_name": chapter_name,
-            },
-        }
-
+    def put_json(self, object_name: str, data: dict):
+        """Alias for backward compatibility with existing collectors."""
         self.upload_json(object_name, data)
-        return object_name, True
 
-    def object_exists(self, object_name):
+    def get_json(self, object_name: str) -> dict:
+        try:
+            response = self.client.get_object(self.bucket, object_name)
+            data = response.read()
+            return json.loads(data.decode("utf-8"))
+        except S3Error as e:
+            if e.code == "NoSuchKey":
+                return {}
+            raise
+        finally:
+            if "response" in locals():
+                response.close()
+                response.release_conn()
+
+    def object_exists(self, object_name: str) -> bool:
         try:
             self.client.stat_object(self.bucket, object_name)
             return True
@@ -172,91 +112,16 @@ class MinIOStorage:
                 return False
             raise
 
-    def get_json(self, object_name):
-        response = self.client.get_object(
-            self.bucket,
-            object_name
-        )
-
+    def list_objects(self, prefix: str = "") -> list[str]:
+        """Returns a list of string object keys matching the prefix."""
         try:
-            data = response.read()
-            return json.loads(data.decode("utf-8"))
-        finally:
-            response.close()
-            response.release_conn()
-
-    def list_objects(self, prefix=""):
-        return self.client.list_objects(
-            self.bucket,
-            prefix=prefix,
-            recursive=True
-        )
-
-    def upload_smart_notes(self, chapter_name, topic, prid, study_intelligence):
-        """Store synthesized UPSC smart notes in MinIO."""
-        def safe_path(val):
-            return str(val).strip().replace("/", "-").replace(chr(92), "-")
-
-        object_name = f"pib/smart_notes/{safe_path(chapter_name)}/{safe_path(topic)}/smart_notes_{prid}.json"
-        self.upload_json(object_name, study_intelligence.model_dump(mode="json"))
-        return object_name
-
-    def list_latest_smart_notes(self, limit: int = 5) -> list:
-        bucket = "upsc-ai"
-        prefix = "pib/smart_notes/"
-        pattern = re.compile(r"pib/smart_notes/([^/]+)/([^/]+)/smart_notes_(\d+)\.json")
-        matched_keys = []
-
-        try:
-            # 1. MinIO Python SDK listing
-            objects = self.client.list_objects(bucket, prefix=prefix, recursive=True)
-            for obj in objects:
-                key = getattr(obj, "object_name", str(obj))
-                match = pattern.search(key)
-                if match:
-                    matched_keys.append({
-                        "prid": int(match.group(3)),
-                        "chapter": match.group(1).strip(),
-                        "topic": match.group(2).strip(),
-                        "key": key
-                    })
+            objects = self.client.list_objects(
+                self.bucket, prefix=prefix, recursive=True
+            )
+            return [obj.object_name for obj in objects]
         except Exception as e:
-            print(f"Error listing objects from {bucket}: {e}")
+            print(f"[!] Error listing MinIO objects: {e}")
             return []
-
-        # 2. Sort descending: highest PRID = latest
-        matched_keys.sort(key=lambda x: x["prid"], reverse=True)
-
-        # 3. Read the JSON metadata for the top items
-        latest_notes = []
-        for item in matched_keys[:limit]:
-            try:
-                data = self.get_json(item["key"])
-                latest_notes.append({
-                    "prid": item["prid"],
-                    "chapter": item["chapter"],
-                    "topic": item["topic"],
-                    "headline": data.get("headline", item["topic"]),
-                    "summary": data.get("summary", ""),
-                    "generated_at": data.get("generated_at", ""),
-                    "object_key": item["key"],
-                    "smart_notes": data
-                })
-            except Exception as read_err:
-                print(f"Failed to fetch content for {item['key']}: {read_err}")
-
-        return latest_notes
-
-    def upload_smart_notes(self, chapter_name: str, topic: str, prid: Any, study_intelligence: Any) -> str:
-            """Serializes and persists synthesized smart notes JSON to R2/MinIO."""
-            def safe_path(val):
-                return str(val).strip().replace("/", "-").replace(chr(92), "-")
-
-            object_name = f"pib/smart_notes/{safe_path(chapter_name)}/{safe_path(topic)}/smart_notes_{prid}.json"
-            
-            data = study_intelligence.model_dump(mode="json") if hasattr(study_intelligence, "model_dump") else study_intelligence
-            self.upload_json(object_name, data)
-            return object_name
     def upload_static_chapter_note(self, chapter_id: int, note_data: dict) -> str:
         """Stores precomputed static Laxmikanth chapter dossier in upsc-ai bucket."""
         object_name = f"static/laxmikanth/chapter_{chapter_id:02d}.json"
