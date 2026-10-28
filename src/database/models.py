@@ -174,7 +174,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
-
+    content_reports: Mapped[list["ContentReport"]] = relationship(
+        cascade="all, delete-orphan",
+        primaryjoin="User.firebase_uid == foreign(ContentReport.firebase_uid)",
+    )
 
 class UserQueryHistory(Base):
     __tablename__ = "user_query_history"
@@ -780,4 +783,65 @@ class QuestionReport(Base):
         DateTime(timezone=True), 
         default=datetime.utcnow, 
         nullable=False
+    )
+
+class ContentReport(Base):
+    """Represents user-reported hallucinations, legal inaccuracies, or formatting bugs across AI features."""
+    __tablename__ = "content_reports"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    firebase_uid: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("users.firebase_uid", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    issue_category: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,  # e.g., 'hallucination', 'outdated_law', 'factual_error', 'formatting'
+    )
+
+    source_page: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,  # e.g., 'ChatbotPM', 'Dossier_Art_356', 'PYQ_1996_2024'
+    )
+
+    flagged_content: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    user_feedback: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    metadata_info: Mapped[dict | None] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default="{}",
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="PENDING",
+        nullable=False,  # 'PENDING', 'UNDER_REVIEW', 'RESOLVED', 'DISMISSED'
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )

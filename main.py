@@ -8,6 +8,7 @@ from src.api.daily_challenge import router as daily_challenge_router
 from src.api.qreport import router as qreport_router
 from src.api.daily_press import router as daily_press_router
 from src.api.chat_agent import router as chat_agent_router
+from src.api.creport import router as reports_router
 app = FastAPI(
     title="UPSC Polity Living Dossiers API",
     description="Multi-source evolving current affairs graph backend for GS-II Mains",
@@ -31,6 +32,7 @@ app.include_router(daily_challenge_router, prefix="/api/v1")
 app.include_router(qreport_router)
 app.include_router(daily_press_router)
 app.include_router(chat_agent_router)
+app.include_router(reports_router)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
@@ -42,6 +44,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=True,
     )
