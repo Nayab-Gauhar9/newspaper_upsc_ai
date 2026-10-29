@@ -40,6 +40,12 @@ class BlueprintChapterSummary(BaseModel):
     question_count: int
 
 
+class BlueprintArticleSummary(BaseModel):
+    article_number: int
+    article_slug: str
+    question_count: int
+
+
 class PrelimsModuleCard(BaseModel):
     module_id: str
     module_number: int  # 1 to 10 for direct numeric routing in FlutterFlow
@@ -50,6 +56,7 @@ class PrelimsModuleCard(BaseModel):
     yield_tier: str
     subtopics: List[str]
     key_articles: List[int]
+    articles: List[BlueprintArticleSummary]  # Structured articles with live question counts
     chapters: List[BlueprintChapterSummary]
     # Ready-to-render display strings for FlutterFlow cards
     chapters_display: str  # e.g., "Ch 1–4 (4 Chapters)" or "Ch 7"
@@ -100,13 +107,13 @@ OFFICIAL_PRELIMS_DECODED = [
         "micro_picture": [
             "Scope and exceptions of Fundamental Rights (Art 14, 19, 21)",
             "Enforceability of DPSPs vs Fundamental Duties",
+
             "Amendment procedures under Article 368 vs Simple Majority",
         ],
         "core_focus_areas": "Part III, Part IV, Part IVA, Art 368",
     },
     {
         "keyword": "Political System",
-
         "macro_picture": "Electoral dynamics, legislative procedures, and parliamentary conventions in action.",
         "micro_picture": [
             "10th Schedule anti-defection rules and judicial review of Speaker",
@@ -166,12 +173,26 @@ def calculate_prelims_module_cards(db: Session) -> List[PrelimsModuleCard]:
     """Computes module cards, question totals, display strings, and yield weightage from database."""
     total_pyqs = db.execute(text("SELECT COUNT(*) FROM prelims_pyqs;")).scalar() or 1
 
+    # 1. Fetch chapter question distribution
     counts_query = text("""
         SELECT chapter_number, COUNT(*) AS count
         FROM prelims_pyqs
         GROUP BY chapter_number;
     """)
     chapter_counts = {row.chapter_number: row.count for row in db.execute(counts_query).all()}
+
+    # 2. Fetch article question distribution across mapped_articles arrays
+    article_counts_query = text("""
+        SELECT UNNEST(mapped_articles) AS art, COUNT(*) AS count
+        FROM prelims_pyqs
+        WHERE mapped_articles IS NOT NULL
+        GROUP BY art;
+    """)
+    article_counts = {
+        int(row.art): row.count
+        for row in db.execute(article_counts_query).all()
+        if row.art is not None
+    }
 
     blueprint_cards = []
 
@@ -187,6 +208,17 @@ def calculate_prelims_module_cards(db: Session) -> List[PrelimsModuleCard]:
                     chapter_number=ch_num,
                     chapter_name=LAXMIKANTH_8TH_EDITION.get(ch_num, f"Chapter {ch_num}"),
                     question_count=q_count,
+                )
+            )
+
+        # Build structured article items with real mapped PYQ totals
+        articles_data = []
+        for art_num in mod.get("key_articles", []):
+            articles_data.append(
+                BlueprintArticleSummary(
+                    article_number=art_num,
+                    article_slug=f"article-{art_num}",
+                    question_count=article_counts.get(art_num, 0),
                 )
             )
 
@@ -229,6 +261,7 @@ def calculate_prelims_module_cards(db: Session) -> List[PrelimsModuleCard]:
                 yield_tier=yield_tier,
                 subtopics=mod["subtopics"],
                 key_articles=mod["key_articles"],
+                articles=articles_data,
                 chapters=chapters_data,
                 chapters_display=chapters_display,
                 articles_display=articles_display,
