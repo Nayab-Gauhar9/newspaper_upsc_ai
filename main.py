@@ -9,6 +9,7 @@ from src.api.qreport import router as qreport_router
 from src.api.daily_press import router as daily_press_router
 from src.api.chat_agent import router as chat_agent_router
 from src.api.creport import router as reports_router
+from src.api.blueprint import router as blueprint_router
 app = FastAPI(
     title="UPSC Polity Living Dossiers API",
     description="Multi-source evolving current affairs graph backend for GS-II Mains",
@@ -33,6 +34,7 @@ app.include_router(qreport_router)
 app.include_router(daily_press_router)
 app.include_router(chat_agent_router)
 app.include_router(reports_router)
+app.include_router(blueprint_router)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
