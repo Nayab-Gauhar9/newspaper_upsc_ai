@@ -1,44 +1,17 @@
 # src/api/routes/articles.py
 import json
-import os
+import time
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
-import redis
 
 from src.database.session import get_db
 from src.database.models import ConstitutionalArticleModel, IssueDossierModel
+from src.storage.redis_cache import get_redis_cache
 
 router = APIRouter(prefix="/api/v1/articles", tags=["Constitutional Articles"])
-
-# --- Redis Client Setup ---
-REDIS_URL = os.getenv("REDIS_URL")
-
-try:
-    if REDIS_URL:
-        redis_client = redis.from_url(
-            REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=2,
-            protocol=2,
-        )
-    else:
-        REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
-        REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-        REDIS_DB = int(os.getenv("REDIS_DB", 0))
-        redis_client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            db=REDIS_DB,
-            decode_responses=True,
-            socket_connect_timeout=1,
-            protocol=2,
-        )
-except Exception as e:
-    print(f"[!] Redis initialization warning: {e}")
-    redis_client = None
 
 # 90 days TTL (3 months)
 TTL_90_DAYS = 90 * 24 * 60 * 60
@@ -96,21 +69,28 @@ class ArticleDetailResponse(BaseModel):
 # --- Endpoints ---
 @router.get("", response_model=List[ArticleListItem])
 def list_articles(
+    response: Response,
     cluster: Optional[str] = Query(None, description="Filter by doctrine cluster"),
     part: Optional[str] = Query(None, description="Filter by Part number"),
     search: Optional[str] = Query(None, description="Search article number or title"),
     session: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
 ):
-    # Deterministic cache key based on query filters
+    start_time = time.perf_counter()
     cache_key = f"articles:catalogue:cluster={cluster or 'all'}:part={part or 'all'}:search={search or 'none'}"
 
     # 1. Redis Cache Hit Check
-    try:
-        cached_data = redis_client.get(cache_key)
-        if cached_data:
-            return json.loads(cached_data)
-    except Exception as e:
-        print(f"[!] Redis list cache read warning: {e}")
+    if r_cache:
+        try:
+            cached_data = r_cache.get(cache_key)
+            if cached_data:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=7776000, stale-while-revalidate=86400"
+                response.headers["X-Cache"] = "HIT"
+                response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+                return json.loads(cached_data)
+        except Exception as e:
+            print(f"[!] Redis list cache read warning: {e}")
 
     # 2. Database Query
     stmt = select(ConstitutionalArticleModel)
@@ -142,32 +122,46 @@ def list_articles(
         for a in articles
     ]
 
-# 3. Store in Redis with 90-day TTL
-    try:
-        redis_client.set(cache_key, json.dumps(response_data), ex=TTL_90_DAYS)
-    except Exception as e:
-        print(f"[!] Redis list cache write warning: {e}")
+    # 3. Store in Redis with 90-day TTL
+    if r_cache:
+        try:
+            r_cache.set(cache_key, json.dumps(response_data), ex=TTL_90_DAYS)
+        except Exception as e:
+            print(f"[!] Redis list cache write warning: {e}")
 
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=7776000, stale-while-revalidate=86400"
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
     return response_data
 
 
 @router.get("/{slug}", response_model=ArticleDetailResponse)
 def get_article_detail(
     slug: str,
+    response: Response,
     session: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
 ):
-    cache_key = f"article:detail:{slug}"
+    start_time = time.perf_counter()
+    clean_slug = slug.strip().lower()
+    cache_key = f"article:detail:{clean_slug}"
 
     # 1. Redis Cache Hit Check
-    try:
-        cached_detail = redis_client.get(cache_key)
-        if cached_detail:
-            return json.loads(cached_detail)
-    except Exception as e:
-        print(f"[!] Redis detail cache read warning: {e}")
+    if r_cache:
+        try:
+            cached_detail = r_cache.get(cache_key)
+            if cached_detail:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=7776000, stale-while-revalidate=86400"
+                response.headers["X-Cache"] = "HIT"
+                response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+                return json.loads(cached_detail)
+        except Exception as e:
+            print(f"[!] Redis detail cache read warning: {e}")
 
     # 2. Fetch Master Article from PostgreSQL
-    stmt = select(ConstitutionalArticleModel).where(ConstitutionalArticleModel.article_slug == slug)
+    stmt = select(ConstitutionalArticleModel).where(ConstitutionalArticleModel.article_slug == clean_slug)
     result = session.execute(stmt)
     article = result.scalar_one_or_none()
 
@@ -211,9 +205,14 @@ def get_article_detail(
     }
 
     # 4. Cache Article Detail in Redis with 90-day TTL
-    try:
-        redis_client.set(cache_key, json.dumps(response_payload), ex=TTL_90_DAYS)
-    except Exception as e:
-        print(f"[!] Redis detail cache write warning: {e}")
+    if r_cache:
+        try:
+            r_cache.set(cache_key, json.dumps(response_payload), ex=TTL_90_DAYS)
+        except Exception as e:
+            print(f"[!] Redis detail cache write warning: {e}")
 
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=7776000, stale-while-revalidate=86400"
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
     return response_payload

@@ -1,5 +1,7 @@
+# src/api/routes/blueprint.py
+import json
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -8,8 +10,11 @@ from src.classifiers.blueprint_taxonomy import PRELIMS_SYLLABUS_BLUEPRINT
 from src.classifiers.taxonomy import LAXMIKANTH_8TH_EDITION
 from src.database.models import PrelimsPYQModel
 from src.database.session import get_db
+from src.storage.redis_cache import get_redis_cache
 
 router = APIRouter(prefix="/api/v1/blueprint", tags=["Syllabus Blueprint"])
+
+CACHE_TTL_BLUEPRINT = 7 * 24 * 60 * 60  # 7 days
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +112,6 @@ OFFICIAL_PRELIMS_DECODED = [
         "micro_picture": [
             "Scope and exceptions of Fundamental Rights (Art 14, 19, 21)",
             "Enforceability of DPSPs vs Fundamental Duties",
-
             "Amendment procedures under Article 368 vs Simple Majority",
         ],
         "core_focus_areas": "Part III, Part IV, Part IVA, Art 368",
@@ -169,7 +173,7 @@ OFFICIAL_PRELIMS_DECODED = [
 # Helper Calculation Function
 # ---------------------------------------------------------------------------
 
-def calculate_prelims_module_cards(db: Session) -> List[PrelimsModuleCard]:
+def calculate_prelims_module_cards(db: Session) -> List[dict]:
     """Computes module cards, question totals, display strings, and yield weightage from database."""
     total_pyqs = db.execute(text("SELECT COUNT(*) FROM prelims_pyqs;")).scalar() or 1
 
@@ -204,22 +208,22 @@ def calculate_prelims_module_cards(db: Session) -> List[PrelimsModuleCard]:
             q_count = chapter_counts.get(ch_num, 0)
             module_question_total += q_count
             chapters_data.append(
-                BlueprintChapterSummary(
-                    chapter_number=ch_num,
-                    chapter_name=LAXMIKANTH_8TH_EDITION.get(ch_num, f"Chapter {ch_num}"),
-                    question_count=q_count,
-                )
+                {
+                    "chapter_number": ch_num,
+                    "chapter_name": LAXMIKANTH_8TH_EDITION.get(ch_num, f"Chapter {ch_num}"),
+                    "question_count": q_count,
+                }
             )
 
         # Build structured article items with real mapped PYQ totals
         articles_data = []
         for art_num in mod.get("key_articles", []):
             articles_data.append(
-                BlueprintArticleSummary(
-                    article_number=art_num,
-                    article_slug=f"article-{art_num}",
-                    question_count=article_counts.get(art_num, 0),
-                )
+                {
+                    "article_number": art_num,
+                    "article_slug": f"article-{art_num}",
+                    "question_count": article_counts.get(art_num, 0),
+                }
             )
 
         percentage = round((module_question_total / total_pyqs) * 100.0, 1)
@@ -250,23 +254,22 @@ def calculate_prelims_module_cards(db: Session) -> List[PrelimsModuleCard]:
         else:
             articles_display = "General Principles"
 
-        blueprint_cards.append(
-            PrelimsModuleCard(
-                module_id=mod["module_id"],
-                module_number=idx,
-                title=mod["title"],
-                official_line=mod["official_line"],
-                total_questions=module_question_total,
-                weightage_percentage=percentage,
-                yield_tier=yield_tier,
-                subtopics=mod["subtopics"],
-                key_articles=mod["key_articles"],
-                articles=articles_data,
-                chapters=chapters_data,
-                chapters_display=chapters_display,
-                articles_display=articles_display,
-            )
+        card = PrelimsModuleCard(
+            module_id=mod["module_id"],
+            module_number=idx,
+            title=mod["title"],
+            official_line=mod["official_line"],
+            total_questions=module_question_total,
+            weightage_percentage=percentage,
+            yield_tier=yield_tier,
+            subtopics=mod["subtopics"],
+            key_articles=mod["key_articles"],
+            articles=articles_data,
+            chapters=chapters_data,
+            chapters_display=chapters_display,
+            articles_display=articles_display,
         )
+        blueprint_cards.append(card.model_dump(mode="json"))
 
     return blueprint_cards
 
@@ -276,28 +279,99 @@ def calculate_prelims_module_cards(db: Session) -> List[PrelimsModuleCard]:
 # ---------------------------------------------------------------------------
 
 @router.get("/prelims", response_model=List[PrelimsModuleCard])
-def get_prelims_blueprint(db: Session = Depends(get_db)):
+def get_prelims_blueprint(
+    response: Response,
+    db: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
+):
     """Returns dynamic module cards with PYQ density and weightage."""
-    return calculate_prelims_module_cards(db)
+    cache_key = "blueprint:prelims:module_cards"
+
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400"
+                response.headers["X-Cache"] = "HIT"
+                return json.loads(cached)
+        except Exception as e:
+            print(f"[!] Redis read error for {cache_key}: {e}")
+
+    cards = calculate_prelims_module_cards(db)
+
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, CACHE_TTL_BLUEPRINT, json.dumps(cards))
+        except Exception as e:
+            print(f"[!] Redis write error for {cache_key}: {e}")
+
+    response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400"
+    response.headers["X-Cache"] = "MISS"
+    return cards
 
 
 @router.get("/prelims/overview", response_model=CompletePrelimsBlueprintOut)
-def get_complete_prelims_blueprint(db: Session = Depends(get_db)):
+def get_complete_prelims_blueprint(
+    response: Response,
+    db: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
+):
     """Returns the official decoded syllabus keyword-by-keyword along with all 10 module cards."""
+    cache_key = "blueprint:prelims:complete_overview"
+
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400"
+                response.headers["X-Cache"] = "HIT"
+                return json.loads(cached)
+        except Exception as e:
+            print(f"[!] Redis read error for {cache_key}: {e}")
+
     cards = calculate_prelims_module_cards(db)
-    return CompletePrelimsBlueprintOut(
+    result = CompletePrelimsBlueprintOut(
         official_syllabus_raw="Indian Polity and Governance – Constitution, Political System, Panchayati Raj, Public Policy, Rights Issues, etc.",
         syllabus_decoded=OFFICIAL_PRELIMS_DECODED,
         modules=cards,
     )
+    payload = result.model_dump(mode="json")
+
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, CACHE_TTL_BLUEPRINT, json.dumps(payload))
+        except Exception as e:
+            print(f"[!] Redis write error for {cache_key}: {e}")
+
+    response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400"
+    response.headers["X-Cache"] = "MISS"
+    return payload
 
 
 @router.get("/prelims/drill/{module_identifier}", response_model=List[PYQQuestionOut])
-def get_pyqs_for_module(module_identifier: str, db: Session = Depends(get_db)):
+def get_pyqs_for_module(
+    module_identifier: str,
+    response: Response,
+    db: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
+):
     """
     Fetches all PYQ questions belonging to any chapter within a given syllabus module.
     Accepts either integer module index (e.g. '3') or string ID (e.g. 'MOD_03_RIGHTS_DUTIES_DPSP').
     """
+    clean_id = module_identifier.strip().upper()
+    cache_key = f"blueprint:drill:{clean_id}"
+
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400"
+                response.headers["X-Cache"] = "HIT"
+                return json.loads(cached)
+        except Exception as e:
+            print(f"[!] Redis read error for {cache_key}: {e}")
+
     selected_module = None
 
     if module_identifier.isdigit():
@@ -306,7 +380,7 @@ def get_pyqs_for_module(module_identifier: str, db: Session = Depends(get_db)):
             selected_module = PRELIMS_SYLLABUS_BLUEPRINT[idx]
     else:
         selected_module = next(
-            (m for m in PRELIMS_SYLLABUS_BLUEPRINT if m["module_id"] == module_identifier),
+            (m for m in PRELIMS_SYLLABUS_BLUEPRINT if m["module_id"].upper() == clean_id),
             None,
         )
 
@@ -321,4 +395,15 @@ def get_pyqs_for_module(module_identifier: str, db: Session = Depends(get_db)):
         .order_by(PrelimsPYQModel.year.desc(), PrelimsPYQModel.question_number.asc())
         .all()
     )
-    return questions
+
+    payload = [PYQQuestionOut.model_validate(q).model_dump(mode="json") for q in questions]
+
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, CACHE_TTL_BLUEPRINT, json.dumps(payload))
+        except Exception as e:
+            print(f"[!] Redis write error for {cache_key}: {e}")
+
+    response.headers["Cache-Control"] = "public, max-age=3600, s-maxage=604800, stale-while-revalidate=86400"
+    response.headers["X-Cache"] = "MISS"
+    return payload

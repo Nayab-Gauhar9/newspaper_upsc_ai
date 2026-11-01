@@ -1,3 +1,4 @@
+# src/api/routes/chat_agent.py
 import json
 import os
 import re
@@ -19,13 +20,18 @@ from src.database.models import (
     DailyChallengeQuestionModel
 )
 from src.storage.minio_client import NewspaperStorage
+from src.storage.redis_cache import get_redis_cache
 
 router = APIRouter(prefix="/api/v1/agent", tags=["AI Constitutional & Platform Concierge"])
 
 IST = timezone(timedelta(hours=5, minutes=30))
 storage = NewspaperStorage()
 
+# Preserving your exact chosen model
 MODEL_NAME = "openai/gpt-oss-120b"
+
+# Cache TTL for tool evaluations (2 hours)
+TOOL_CACHE_TTL = 7200
 
 # ------------------------------------------------------------------------------
 # 1. Text Sanitization (Hard Strip of Markdown Asterisks & Artifacts)
@@ -102,7 +108,7 @@ class ChatResponse(BaseModel):
 
 
 # ------------------------------------------------------------------------------
-# 4. Execution Tools
+# 4. Execution Tools (with Redis Caching Layer)
 # ------------------------------------------------------------------------------
 def resolve_platform_faq(topic: str) -> str:
     topic_clean = topic.strip().lower()
@@ -115,8 +121,17 @@ def resolve_platform_faq(topic: str) -> str:
         "and 15-question daily practice drills. For direct support, email support@politymentor.com."
     )
 
-def fetch_constitutional_article(article_identifier: str, session: Session) -> Dict[str, Any]:
+def fetch_constitutional_article(article_identifier: str, session: Session, r_cache=None) -> Dict[str, Any]:
     clean_id = article_identifier.strip()
+    cache_key = f"agent:tool:article:{clean_id.lower()}"
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
     normalized_slug = clean_id.lower().replace(" ", "-").replace("(", "-").replace(")", "")
     digits = re.findall(r"\d+", clean_id)
     raw_num = digits[0] if digits else clean_id
@@ -133,7 +148,7 @@ def fetch_constitutional_article(article_identifier: str, session: Session) -> D
     if not article:
         return {"error": f"Article '{article_identifier}' not found in the constitutional database."}
 
-    return {
+    res = {
         "article_number": article.article_number,
         "title": article.title,
         "part_number": article.part_number,
@@ -142,9 +157,27 @@ def fetch_constitutional_article(article_identifier: str, session: Session) -> D
         "aspirant_summary": article.aspirant_summary,
     }
 
-def fetch_issue_dossier(topic: str, session: Session) -> Dict[str, Any]:
-    """Queries thematic dossiers matching chapter_name, title, or issue_slug, including connected graph edges."""
-    search_term = f"%{topic.strip()}%"
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, TOOL_CACHE_TTL, json.dumps(res))
+        except Exception:
+            pass
+
+    return res
+
+def fetch_issue_dossier(topic: str, session: Session, r_cache=None) -> Dict[str, Any]:
+    """Queries thematic dossiers with edge caching."""
+    clean_topic = topic.strip().lower()
+    cache_key = f"agent:tool:dossier:{clean_topic}"
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    search_term = f"%{clean_topic}%"
     stmt = (
         select(IssueDossierModel)
         .where(
@@ -168,7 +201,7 @@ def fetch_issue_dossier(topic: str, session: Session) -> Dict[str, Any]:
     edges = session.execute(edges_stmt).all()
     related = [{"slug": e[0], "relation": e[1]} for e in edges]
 
-    return {
+    res = {
         "title": dossier.title,
         "chapter": dossier.chapter_name,
         "canonical_summary": dossier.canonical_summary or "",
@@ -177,9 +210,27 @@ def fetch_issue_dossier(topic: str, session: Session) -> Dict[str, Any]:
         "connected_topics": related
     }
 
-def fetch_relevant_pyq(topic: str, session: Session) -> Dict[str, Any]:
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, TOOL_CACHE_TTL, json.dumps(res))
+        except Exception:
+            pass
+
+    return res
+
+def fetch_relevant_pyq(topic: str, session: Session, r_cache=None) -> Dict[str, Any]:
     """Queries authentic UPSC Prelims Previous Year Questions (1996 - 2026)."""
-    search_term = f"%{topic.strip()}%"
+    clean_topic = topic.strip().lower()
+    cache_key = f"agent:tool:pyq:{clean_topic}"
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    search_term = f"%{clean_topic}%"
     stmt = (
         select(PrelimsPYQModel)
         .where(
@@ -196,7 +247,7 @@ def fetch_relevant_pyq(topic: str, session: Session) -> Dict[str, Any]:
     if not pyqs:
         return {"message": f"No official PYQs found matching '{topic}'."}
 
-    return {
+    res = {
         "pyqs": [
             {
                 "year": q.year,
@@ -210,8 +261,16 @@ def fetch_relevant_pyq(topic: str, session: Session) -> Dict[str, Any]:
         ]
     }
 
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, TOOL_CACHE_TTL, json.dumps(res))
+        except Exception:
+            pass
+
+    return res
+
 def fetch_practice_drill_mcq(topic: str, session: Session) -> Dict[str, Any]:
-    """Retrieves a high-yield practice MCQ from the preserved daily challenge drills."""
+    """Retrieves a high-yield practice MCQ from preserved daily drills."""
     search_term = f"%{topic.strip()}%"
     stmt = (
         select(DailyChallengeQuestionModel)
@@ -242,8 +301,17 @@ def fetch_practice_drill_mcq(topic: str, session: Session) -> Dict[str, Any]:
         "trap_concept": getattr(mcq, "trap_concept", "")
     }
 
-def fetch_daily_press_intelligence(keyword: Optional[str] = None, target_date: Optional[str] = None) -> Dict[str, Any]:
-    """Scans synthesized smart notes in MinIO."""
+def fetch_daily_press_intelligence(keyword: Optional[str] = None, target_date: Optional[str] = None, r_cache=None) -> Dict[str, Any]:
+    """Scans synthesized smart notes in MinIO with Redis key memoization."""
+    cache_key = f"agent:tool:press:{keyword or 'all'}:{target_date or 'latest'}"
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
     all_objects = storage.list_objects(prefix="daily_press/")
     note_keys = [k for k in all_objects if "/smart_notes/" in k and k.endswith(".json")]
 
@@ -282,18 +350,35 @@ def fetch_daily_press_intelligence(keyword: Optional[str] = None, target_date: O
         if len(matched_notes) >= 3:
             break
 
-    return {
+    res = {
         "total_matches": len(matched_notes),
         "notes": matched_notes
     }
 
-def search_pib_releases(keyword: str, target_date: Optional[str] = None) -> Dict[str, Any]:
-    """Searches official Press Information Bureau (PIB) releases from MinIO."""
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, 1800, json.dumps(res))
+        except Exception:
+            pass
+
+    return res
+
+def search_pib_releases(keyword: str, target_date: Optional[str] = None, r_cache=None) -> Dict[str, Any]:
+    """Searches official PIB releases from MinIO with Redis caching."""
+    clean_kw = keyword.strip().lower()
+    cache_key = f"agent:tool:pib:{clean_kw}:{target_date or 'latest'}"
+    if r_cache:
+        try:
+            cached = r_cache.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
     query_prefix = f"pib/{target_date}/" if target_date else "pib/"
     pib_objects = storage.list_objects(prefix=query_prefix)
     
     pib_keys = sorted([k for k in pib_objects if k.endswith(".json")], reverse=True)
-    kw_lower = keyword.strip().lower()
     matched_releases = []
 
     for key in pib_keys[:20]:
@@ -306,7 +391,7 @@ def search_pib_releases(keyword: str, target_date: Optional[str] = None) -> Dict
         summary = data.get("summary", "") or data.get("content", "")
 
         corpus = f"{title} {ministry} {summary}".lower()
-        if kw_lower in corpus:
+        if clean_kw in corpus:
             matched_releases.append({
                 "title": title,
                 "ministry": ministry,
@@ -317,9 +402,17 @@ def search_pib_releases(keyword: str, target_date: Optional[str] = None) -> Dict
                 break
 
     if not matched_releases:
-        return {"message": f"No recent PIB releases found matching '{keyword}'."}
+        res = {"message": f"No recent PIB releases found matching '{keyword}'."}
+    else:
+        res = {"pib_matches": matched_releases}
 
-    return {"pib_matches": matched_releases}
+    if r_cache:
+        try:
+            r_cache.setex(cache_key, 1800, json.dumps(res))
+        except Exception:
+            pass
+
+    return res
 
 
 # ------------------------------------------------------------------------------
@@ -500,7 +593,6 @@ def is_follow_up_query(query: str, history: List[ChatMessage]) -> bool:
     ]
     has_stem = any(stem in q_lower for stem in follow_up_stems)
 
-    # If it refers to previous context and doesn't explicitly declare a new article code
     explicit_new_article = bool(re.search(r"\barticle\s+\d+", q_lower) and not has_pronoun)
 
     if explicit_new_article:
@@ -513,10 +605,13 @@ def is_follow_up_query(query: str, history: List[ChatMessage]) -> bool:
 # 6. Two-Step Autonomous Agent Execution
 # ------------------------------------------------------------------------------
 @router.post("/chat", response_model=ChatResponse)
-def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db)):
+def handle_agent_chat(
+    request: ChatRequest,
+    db_session: Session = Depends(get_db),
+    r_cache=Depends(get_redis_cache),
+):
     messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Prevent duplicate identical user queries from client history
     valid_roles = {"user", "assistant", "system"}
     cleaned_history: List[Dict[str, str]] = []
     for msg in request.history[-6:]:
@@ -531,7 +626,7 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
     tools_used: List[str] = []
 
     try:
-        # Step 1: Tool Selection Call
+        # Step 1: Tool Selection Call with your specified model
         def _call_groq_tools(client):
             return client.chat.completions.create(
                 model=MODEL_NAME,
@@ -555,7 +650,7 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
                 tools_used=[]
             )
 
-        # Step 2: Execute triggered tools across database
+        # Step 2: Execute triggered tools across database/cache
         tool_results_summary: List[str] = []
 
         for tool_call in response_message.tool_calls:
@@ -568,17 +663,20 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
             elif t_name == "fetch_constitutional_article":
                 res = fetch_constitutional_article(
                     article_identifier=t_args.get("article_identifier", ""),
-                    session=db_session
+                    session=db_session,
+                    r_cache=r_cache
                 )
             elif t_name == "fetch_issue_dossier":
                 res = fetch_issue_dossier(
                     topic=t_args.get("topic", ""),
-                    session=db_session
+                    session=db_session,
+                    r_cache=r_cache
                 )
             elif t_name == "fetch_relevant_pyq":
                 res = fetch_relevant_pyq(
                     topic=t_args.get("topic", ""),
-                    session=db_session
+                    session=db_session,
+                    r_cache=r_cache
                 )
             elif t_name == "fetch_practice_drill_mcq":
                 res = fetch_practice_drill_mcq(
@@ -590,33 +688,31 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
                 t_date = t_args.get("target_date")
                 res = fetch_daily_press_intelligence(
                     keyword=kw if kw and kw != "null" else None,
-                    target_date=t_date if t_date and t_date != "null" else None
+                    target_date=t_date if t_date and t_date != "null" else None,
+                    r_cache=r_cache
                 )
             elif t_name == "search_pib_releases":
                 kw = t_args.get("keyword", "")
                 t_date = t_args.get("target_date")
                 res = search_pib_releases(
                     keyword=kw or "",
-                    target_date=t_date if t_date and t_date != "null" else None
+                    target_date=t_date if t_date and t_date != "null" else None,
+                    r_cache=r_cache
                 )
             else:
                 query_val = list(t_args.values())[0] if t_args else request.message
-                res = fetch_issue_dossier(topic=str(query_val), session=db_session)
+                res = fetch_issue_dossier(topic=str(query_val), session=db_session, r_cache=r_cache)
 
             tool_results_summary.append(f"Data from {t_name}:\n{json.dumps(res, ensure_ascii=False)}")
 
-        # Check if this query is a conversational follow-up
         is_follow_up = is_follow_up_query(request.message, request.history)
 
-        # Build synthesis messages preserving context
         synthesis_messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Inject conversation history so follow-ups retain context
         if cleaned_history:
             synthesis_messages.extend(cleaned_history)
 
         if is_follow_up:
-            # Contextual follow-up prompt: Direct answer, no rigid template
             synthesis_instruction = (
                 f"Retrieved Database Intelligence:\n"
                 f"{chr(10).join(tool_results_summary)}\n\n"
@@ -631,7 +727,6 @@ def handle_agent_chat(request: ChatRequest, db_session: Session = Depends(get_db
                 f"Strictly use plain text only: absolutely NO asterisks for bolding (* or **), NO markdown headers, NO tables."
             )
         else:
-            # Comprehensive query: Full structured jurist breakdown
             synthesis_instruction = (
                 f"Retrieved Database Intelligence:\n"
                 f"{chr(10).join(tool_results_summary)}\n\n"
