@@ -89,26 +89,32 @@ def list_queue(
         })
     return result
 
-@router.put("/queue/{campaign_id}")
 @router.put("/queue/{campaign_id}/amend")
+@router.put("/queue/{campaign_id}")
 def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depends(get_db)):
-    """Edits slide content from back office and immediately re-renders the PNG slides."""
     campaign = db.query(SocialCampaignQueue).filter(SocialCampaignQueue.id == campaign_id).first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
-    if isinstance(req.slides_payload, list):
-        payload_dict = {"slides": req.slides_payload}
-        slides = req.slides_payload
-    else:
-        payload_dict = req.slides_payload
+    # 1. Unpack slides list safely
+    if isinstance(req.slides_payload, dict):
         slides = req.slides_payload.get("slides", [])
+        payload_to_store = req.slides_payload
+    elif isinstance(req.slides_payload, list):
+        slides = req.slides_payload
+        payload_to_store = {"slides": req.slides_payload}
+    else:
+        slides = []
+        payload_to_store = {"slides": []}
 
-    campaign.slides_payload = payload_dict
+    if not slides:
+        raise HTTPException(status_code=400, detail="No slides provided in slides_payload.")
+
+    campaign.slides_payload = payload_to_store
     if req.caption:
         campaign.caption = req.caption
 
-    # Re-render PNG images using the edited JSON payload
+    # 2. Re-render PNG images with the edited slide content
     new_paths = render_campaign_slides(campaign.article_number, slides, campaign.id)
     campaign.image_paths = new_paths
 
@@ -118,7 +124,8 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
     return {
         "status": "success",
         "message": "Content updated and slides re-rendered.",
-        "image_paths": new_paths
+        "image_paths": new_paths,
+        "slides_payload": payload_to_store
     }
 
 @router.post("/queue/{campaign_id}/approve")
