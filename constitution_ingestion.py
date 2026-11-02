@@ -221,10 +221,10 @@ def generate_article_via_groq(meta: Dict[str, str], max_retries: int = 4) -> Opt
 
     return None
 
-
 def upsert_and_cache(meta: Dict[str, str], data: Dict[str, Any]):
     db = SessionLocal()
     slug = meta["slug"]
+    clean_slug = slug.strip().lower()
     try:
         data_to_store = {
             "article_number": meta["number"],
@@ -239,18 +239,22 @@ def upsert_and_cache(meta: Dict[str, str], data: Dict[str, Any]):
             "bare_act_analysis": data.get("bare_act_analysis", [])
         }
 
-        # PostgreSQL Upsert
+        # 1. PostgreSQL Upsert
         existing = db.query(ConstitutionalArticleModel).filter_by(article_slug=slug).first()
         if existing:
             for k, v in data_to_store.items():
                 setattr(existing, k, v)
+            article_id = existing.id
         else:
-            db.add(ConstitutionalArticleModel(**data_to_store))
+            new_article = ConstitutionalArticleModel(**data_to_store)
+            db.add(new_article)
+            db.flush()
+            article_id = new_article.id
 
         db.commit()
         print(f"  [✓] PostgreSQL: Saved {meta['number']} ({len(data_to_store['verbatim_text'])} chars)")
 
-        # Reverse query for living dossiers
+        # 2. Reverse query for living dossiers
         target_json = {"constitutional_articles": [meta["number"]]}
         dossiers = db.execute(
             select(IssueDossierModel)
@@ -262,11 +266,30 @@ def upsert_and_cache(meta: Dict[str, str], data: Dict[str, Any]):
             for d in dossiers
         ]
 
-        # Redis 30-Day TTL Cache
-        cache_payload = {**data_to_store, "linked_dossiers": linked_dossiers}
-        redis_key = f"article:{slug}"
-        redis_client.set(redis_key, json.dumps(cache_payload), ex=REDIS_TTL_30_DAYS)
-        print(f"  [✓] Redis: Cached '{redis_key}' (TTL: 30 days)")
+        # -------------------------------------------------------------
+        # 3. UNIFIED REDIS CACHING & INSTANT EVICTION (ADD HERE)
+        # -------------------------------------------------------------
+        # Format payload matching ArticleDetailResponse schema in articles.py
+        cache_payload = {
+            "id": article_id,
+            **data_to_store, 
+            "linked_dossiers": linked_dossiers
+        }
+
+        # A. Warm the exact keys used by both articles.py and app.py
+        redis_client.set(f"article:detail:{clean_slug}", json.dumps(cache_payload), ex=REDIS_TTL_30_DAYS)
+        redis_client.set(f"articles:detail:{article_id}", json.dumps({"status": "success", "article": cache_payload}), ex=REDIS_TTL_30_DAYS)
+
+        # B. Instantly evict catalogue query caches so new/edited articles show up in listings immediately
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor=cursor, match="articles:catalogue:*", count=100)
+            if keys:
+                redis_client.delete(*keys)
+            if cursor == 0:
+                break
+
+        print(f"  [✓] Redis: Warmed 'article:detail:{clean_slug}', 'articles:detail:{article_id}' and purged catalogue lists.")
 
     except Exception as e:
         db.rollback()

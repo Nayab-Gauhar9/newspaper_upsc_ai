@@ -12,6 +12,7 @@ from src.database.session import SessionLocal
 from src.database.models import IssueDossierModel, IssueGraphEdgeModel
 from src.storage.minio_client import NewspaperStorage
 from src.classifiers.editorial_classifier import KeyRotator
+from src.storage.redis_cache import delete_cached_key, delete_cached_pattern
 
 load_dotenv()
 
@@ -73,6 +74,27 @@ def sanitize_prid(raw_id: str, clean_filename_id: str) -> str:
     short_hash = hashlib.md5(base.encode("utf-8")).hexdigest()[:10]
     return f"NOTE_{short_hash}"
 
+def evict_dossier_pipeline_cache(issue_slug: str):
+    """
+    Clears all Redis caches associated with this specific dossier,
+    as well as list, feed, and admin overviews.
+    """
+    clean_slug = issue_slug.strip().lower()
+    
+    # 1. Clear single dossier detail and timeline keys
+    delete_cached_key(f"dossier:detail:{clean_slug}")
+    delete_cached_key(f"dossier:timeline:{clean_slug}")
+
+    # 2. Clear listing feeds and admin overviews
+    delete_cached_pattern("admin:dossiers:list:*")
+    delete_cached_pattern("dossiers:feed:*")
+    delete_cached_pattern("dossiers:by-chapter:*")
+    delete_cached_pattern("dossiers:list:*")
+    delete_cached_pattern("dossiers:chapters:summary")
+    delete_cached_pattern("dossiers:drills:*")
+    
+    # 3. Clear dynamic sitemap XML so search engines pick up the new slug
+    delete_cached_key("seo:sitemap:xml")
 
 class DossierGraphSync:
     """Stage 2: Graph Synchronizer with Fast LLM Semantic Broker.
@@ -357,7 +379,9 @@ Evaluate if this new incoming event is a timeline development, aftermath, or par
         session.add(edge)
         session.commit()
         print(f"  [✓] Linked edge: '{article_id}' -> '{dossier.issue_slug}'")
-
+        evict_dossier_pipeline_cache(dossier.issue_slug)
+        print(f"  [⚡] Purged Redis cache for dossier '{dossier.issue_slug}' and related feeds.")
+        
     def run_sync(self, reset_db: bool = False):
         if reset_db:
             with SessionLocal() as db:

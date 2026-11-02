@@ -174,6 +174,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    sessions: Mapped[list["UserSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     content_reports: Mapped[list["ContentReport"]] = relationship(
         cascade="all, delete-orphan",
         primaryjoin="User.firebase_uid == foreign(ContentReport.firebase_uid)",
@@ -785,6 +789,63 @@ class QuestionReport(Base):
         nullable=False
     )
 
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    firebase_uid: Mapped[str] = mapped_column(
+        String(128),
+        index=True,
+        nullable=False,
+    )
+
+    display_name: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    event_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,  # 'LOGIN' or 'LOGOUT'
+    )
+
+    duration_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,  # Populated on LOGOUT with time elapsed since the latest LOGIN
+    )
+
+    ip_address: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
+    user_agent: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="sessions",
+    )
+
 class ContentReport(Base):
     """Represents user-reported hallucinations, legal inaccuracies, or formatting bugs across AI features."""
     __tablename__ = "content_reports"
@@ -845,3 +906,25 @@ class ContentReport(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+class SocialCampaignQueue(Base):
+    __tablename__ = "social_campaign_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("constitutional_articles.id", ondelete="CASCADE"), nullable=False)
+    article_number: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    
+    # State machine: PENDING_APPROVAL, APPROVED, REJECTED, PUBLISHED
+    status: Mapped[str] = mapped_column(String(32), default="PENDING_APPROVAL", nullable=False)
+    
+    # Stores the synthesized 5-slide JSON data
+    slides_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    
+    # Static paths/URLs to the rendered 1080x1350 PNG slides
+    image_paths: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

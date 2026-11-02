@@ -1,4 +1,5 @@
 import uvicorn
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.issues import router as issues_router
@@ -10,6 +11,9 @@ from src.api.daily_press import router as daily_press_router
 from src.api.chat_agent import router as chat_agent_router
 from src.api.creport import router as reports_router
 from src.api.blueprint import router as blueprint_router
+from src.api.social_cockpit import router as social_router
+from fastapi.staticfiles import StaticFiles
+
 app = FastAPI(
     title="UPSC Polity Living Dossiers API",
     description="Multi-source evolving current affairs graph backend for GS-II Mains",
@@ -25,6 +29,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+os.makedirs(os.path.join("static", "social_previews"), exist_ok=True)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 # Mount routes
 app.include_router(issues_router)
 app.include_router(articles_router)
@@ -35,6 +42,7 @@ app.include_router(daily_press_router)
 app.include_router(chat_agent_router)
 app.include_router(reports_router)
 app.include_router(blueprint_router)
+app.include_router(social_router)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
@@ -46,6 +54,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=True,
     )
