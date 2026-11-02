@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union, List, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
 from src.database.session import SessionLocal
@@ -18,22 +18,40 @@ def get_db():
         db.close()
 
 class GenerateArticleRequest(BaseModel):
-    article: str  # e.g., "200", "356", "72"
+    article: Optional[str] = None
+    article_number: Optional[str] = None
+    tier: Optional[str] = "TIER_1"
+
+    @model_validator(mode="before")
+    def resolve_article_param(cls, values):
+        if isinstance(values, dict):
+            article_val = values.get("article") or values.get("article_number")
+            if not article_val:
+                raise ValueError("Must provide either 'article' or 'article_number'.")
+            values["article"] = str(article_val).strip()
+            values["article_number"] = str(article_val).strip()
+        return values
 
 class AmendCampaignRequest(BaseModel):
-    slides_payload: dict
+    slides_payload: Union[dict, List[Any]]
     caption: Optional[str] = None
 
 @router.post("/generate")
 def generate_draft(req: GenerateArticleRequest, db: Session = Depends(get_db)):
     """Triggers generation for a specific article into PENDING_APPROVAL status."""
     try:
-        campaign = generate_campaign_for_article(db, req.article)
+        target_article = req.article or req.article_number
+        campaign = generate_campaign_for_article(db, target_article)
         return {
             "status": "success",
             "message": f"Draft created for {campaign.article_number}",
             "campaign_id": campaign.id,
-            "preview_images": campaign.image_paths
+            "id": campaign.id,
+            "article_number": campaign.article_number,
+            "slides_payload": campaign.slides_payload.get("slides", []) if isinstance(campaign.slides_payload, dict) else campaign.slides_payload,
+            "image_paths": campaign.image_paths,
+            "caption": campaign.caption,
+            "created_at": campaign.created_at.isoformat()
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -41,28 +59,37 @@ def generate_draft(req: GenerateArticleRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 
 @router.get("/queue")
-def list_queue(status_filter: str = Query("PENDING_APPROVAL"), db: Session = Depends(get_db)):
+def list_queue(
+    status: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
     """Lists draft campaigns waiting for review in back office."""
-    items = (
-        db.query(SocialCampaignQueue)
-        .filter(SocialCampaignQueue.status == status_filter)
-        .order_by(SocialCampaignQueue.created_at.desc())
-        .all()
-    )
-    return [
-        {
+    target_status = status or status_filter
+    query = db.query(SocialCampaignQueue)
+    if target_status and target_status.upper() != "ALL":
+        query = query.filter(SocialCampaignQueue.status == target_status.upper())
+
+    items = query.order_by(SocialCampaignQueue.created_at.desc()).all()
+    
+    result = []
+    for c in items:
+        # Extract flat list of slides if wrapped in {"slides": [...]}
+        slides_list = c.slides_payload.get("slides", []) if isinstance(c.slides_payload, dict) else c.slides_payload
+        result.append({
             "id": c.id,
+            "article_id": c.article_id,
             "article_number": c.article_number,
             "title": c.title,
             "status": c.status,
-            "slides_payload": c.slides_payload,
+            "slides_payload": slides_list,
             "image_paths": c.image_paths,
             "caption": c.caption,
-            "created_at": c.created_at.isoformat()
-        }
-        for c in items
-    ]
+            "created_at": c.created_at.isoformat() if c.created_at else datetime.utcnow().isoformat()
+        })
+    return result
 
+@router.put("/queue/{campaign_id}")
 @router.put("/queue/{campaign_id}/amend")
 def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depends(get_db)):
     """Edits slide content from back office and immediately re-renders the PNG slides."""
@@ -70,12 +97,18 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
-    campaign.slides_payload = req.slides_payload
+    if isinstance(req.slides_payload, list):
+        payload_dict = {"slides": req.slides_payload}
+        slides = req.slides_payload
+    else:
+        payload_dict = req.slides_payload
+        slides = req.slides_payload.get("slides", [])
+
+    campaign.slides_payload = payload_dict
     if req.caption:
         campaign.caption = req.caption
 
     # Re-render PNG images using the edited JSON payload
-    slides = req.slides_payload.get("slides", [])
     new_paths = render_campaign_slides(campaign.article_number, slides, campaign.id)
     campaign.image_paths = new_paths
 

@@ -383,3 +383,139 @@ def render_slide_5(slide: dict, output_path: str):
         y_box += box_h + 16
 
     img.save(output_path, "PNG")
+
+# ---------------------------------------------------------------------------
+# SLIDE 6: HIGH-ENERGY PROMOTIONAL & SOCIAL ECOSYSTEM
+# ---------------------------------------------------------------------------
+def render_slide_6(slide: dict, output_path: str):
+    W, H = 1080, 1350
+    img = Image.new("RGBA", (W, H), COLOR_BG)
+    draw = ImageDraw.Draw(img)
+
+    # Base container
+    card_margin = 46
+    draw.rounded_rectangle(
+        [card_margin, card_margin, W - card_margin, H - card_margin],
+        radius=24,
+        fill=COLOR_CARD,
+        outline=COLOR_CARD_BORDER,
+        width=2
+    )
+
+    # Top Brand Header
+    logo = get_logo_image(size=44)
+    text_x = 96
+    if logo:
+        img.paste(logo, (96, 84), logo)
+        draw.ellipse([94, 82, 142, 130], outline=COLOR_GOLD, width=1)
+        text_x = 152
+    else:
+        draw.ellipse([96, 84, 138, 126], fill=(28, 38, 64), outline=COLOR_GOLD, width=2)
+        draw.line([(117, 92), (117, 118)], fill=COLOR_GOLD, width=2)
+        draw.line([(106, 100), (128, 100)], fill=COLOR_GOLD, width=2)
+        text_x = 152
+
+    font_brand = resolve_font("black", 25)
+    font_slide = resolve_font("bold", 20)
+    draw.text((text_x, 92), "POLITY MENTOR", font=font_brand, fill=COLOR_GOLD)
+    draw.text((W - 96 - 130, 96), "SLIDE 6 / 6", font=font_slide, fill=COLOR_ROSE)
+    draw.line([(96, 140), (W - 96, 140)], fill=COLOR_CARD_BORDER, width=2)
+
+    # 1. Illuminated Top Promo Tag
+    draw.rounded_rectangle([96, 175, 340, 218], radius=10, fill=(30, 41, 70), outline=COLOR_GOLD, width=2)
+    font_badge = resolve_font("bold", 16)
+    draw.text((116, 187), "POLITY MENTOR AI", font=font_badge, fill=COLOR_GOLD)
+
+    # 2. Main High-Impact Headline
+    font_hero_1 = resolve_font("black", 48)
+    font_hero_2 = resolve_font("black", 48)
+    draw.text((96, 248), "MASTER UPSC POLITY", font=font_hero_1, fill=COLOR_TEXT_WHITE)
+    draw.text((96, 308), "WITH AI PRECISION", font=font_hero_2, fill=COLOR_GOLD)
+
+    font_sub = resolve_font("medium", 22)
+    draw.text((96, 372), "The Constitutional Intelligence Terminal built for GS-II Rankers", font=font_sub, fill=COLOR_ROSE)
+
+    # 3. Punchy Feature Highlights (Clean Dark Glass Panels with Accent Dots)
+    features = [
+        ("DAILY PRESS DOSSIERS", "Real-time PIB, Hindu & Express updates mapped directly to Articles.", (56, 189, 248)),
+        ("30-YEAR PRELIMS PYQ BANK", "Categorized question matrices with exact traps & procedural rules.", (245, 158, 11)),
+        ("MAINS GS-II FRAMEWORKS", "Structured dialectics, commission reports & landmark SC precedents.", (185, 159, 159))
+    ]
+
+    y_feat = 425
+    for title, desc, dot_col in features:
+        # Subtle card
+        draw.rounded_rectangle([96, y_feat, W - 96, y_feat + 74], radius=14, fill=(18, 26, 46, 255), outline=(45, 58, 88), width=1)
+        
+        # Glow Accent Indicator
+        draw.rounded_rectangle([114, y_feat + 18, 120, y_feat + 56], radius=3, fill=dot_col)
+        
+        # Title & Sub
+        draw.text((136, y_feat + 14), title, font=resolve_font("bold", 17), fill=dot_col)
+        draw.text((136, y_feat + 40), desc, font=resolve_font("regular", 17), fill=COLOR_TEXT_BODY)
+        y_feat += 86
+
+    # 4. CTA Community Header
+    font_cta_head = resolve_font("black", 18)
+    draw.text((96, y_feat + 12), "CONNECT ACROSS THE ECOSYSTEM", font=font_cta_head, fill=COLOR_TEXT_WHITE)
+    draw.line([(440, y_feat + 24), (W - 96, y_feat + 24)], fill=COLOR_CARD_BORDER, width=1)
+
+    # 5. Distinct Color-Coded Channels
+    channels = [
+        {
+            "badge": "WEB PORTAL",
+            "val": "politymentor.com",
+            "sub": "Interactive Bare Act • RAG Dossiers • Daily Notes",
+            "accent": COLOR_GOLD,
+            "badge_bg": (45, 38, 20)
+        },
+        {
+            "badge": "TELEGRAM",
+            "val": "t.me/polity_mentor_ai",
+            "sub": "Daily Press Capsules, Editorials & UPSC MCQs",
+            "accent": (56, 189, 248),  # Sky blue
+            "badge_bg": (12, 40, 65)
+        },
+        {
+            "badge": "INSTAGRAM",
+            "val": "@politymentor_ai",
+            "sub": "Visual Concept Carousels, Exam Traps & Rapid Prep",
+            "accent": (244, 114, 182), # Rose / Pink
+            "badge_bg": (50, 18, 35)
+        }
+    ]
+
+    y_ch = y_feat + 48
+    for ch in channels:
+        # High contrast card
+        draw.rounded_rectangle([96, y_ch, W - 96, y_ch + 92], radius=16, fill=(14, 20, 36, 255), outline=ch["accent"], width=2)
+        
+        # Pill Tag
+        font_tag = resolve_font("bold", 14)
+        tag_w = int(draw.textlength(ch["badge"], font=font_tag)) + 24
+        draw.rounded_rectangle([120, y_ch + 16, 120 + tag_w, y_ch + 42], radius=8, fill=ch["badge_bg"], outline=ch["accent"], width=1)
+        draw.text((132, y_ch + 20), ch["badge"], font=font_tag, fill=ch["accent"])
+
+        # Main Address / Link
+        font_link = resolve_font("black", 24)
+        draw.text((120 + tag_w + 18, y_ch + 15), ch["val"], font=font_link, fill=COLOR_TEXT_WHITE)
+
+        # Micro subtext
+        font_ch_sub = resolve_font("regular", 16)
+        draw.text((120, y_ch + 55), ch["sub"], font=font_ch_sub, fill=COLOR_TEXT_MUTED)
+
+        # Arrow indicator
+        draw_vector_arrow(draw, W - 128, y_ch + 46, length=12)
+
+        y_ch += 106
+
+    # Footer
+    draw.line([(96, H - 120), (W - 96, H - 120)], fill=COLOR_CARD_BORDER, width=2)
+    font_footer = resolve_font("medium", 21)
+    draw.text((96, H - 88), "politymentor.com", font=font_footer, fill=COLOR_TEXT_MUTED)
+    
+    cta_font = resolve_font("bold", 21)
+    draw.text((W - 96 - 220, H - 88), "Tap Link in Bio", font=cta_font, fill=COLOR_GOLD)
+    draw_vector_arrow(draw, W - 96 - 45, H - 77, length=12)
+
+    img.save(output_path, "PNG")

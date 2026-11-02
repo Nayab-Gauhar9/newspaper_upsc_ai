@@ -1,4 +1,5 @@
 import os
+import re
 import json
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -10,7 +11,8 @@ from src.services.social_slide_renderer import (
     render_slide_2,
     render_slide_3,
     render_slide_4,
-    render_slide_5
+    render_slide_5,
+    render_slide_6
 )
 
 # Groq API endpoint
@@ -33,7 +35,7 @@ Return STRICT JSON ONLY matching this exact structure:
 {
   "slides": [
     {
-      "slide_num": "1 / 5",
+      "slide_num": "1 / 6",
       "tier_badge": "JURISPRUDENTIAL ARCHITECTURE • GS-II",
       "headline": "ARTICLE NUMBER",
       "subheadline": "CORE DOCTRINAL CATCHPHRASE",
@@ -41,7 +43,7 @@ Return STRICT JSON ONLY matching this exact structure:
       "chips": ["Cluster: ...", "Domain: ...", "Pillar: ..."]
     },
     {
-      "slide_num": "2 / 5",
+      "slide_num": "2 / 6",
       "tier_badge": "CONSTITUENT ASSEMBLY CRUCIBLE",
       "headline": "Colonial Genesis vs. Framers' Vision",
       "colonial_title": "COLONIAL ROOTS (STATUTE ANCESTRY)",
@@ -51,7 +53,7 @@ Return STRICT JSON ONLY matching this exact structure:
       "analytical_insight": "The structural constitutional paradox..."
     },
     {
-      "slide_num": "3 / 5",
+      "slide_num": "3 / 6",
       "tier_badge": "THE JURISPRUDENTIAL TURNING POINT",
       "headline": "Exact Landmark Case Name from database",
       "subheadline": "Core Doctrinal Catchphrase",
@@ -62,7 +64,7 @@ Return STRICT JSON ONLY matching this exact structure:
       ]
     },
     {
-      "slide_num": "4 / 5",
+      "slide_num": "4 / 6",
       "tier_badge": "PROCEDURAL MATRIX & EXAM TRAPS",
       "headline": "Constitutional Parameters & Traps",
       "rows": [
@@ -73,7 +75,7 @@ Return STRICT JSON ONLY matching this exact structure:
       ]
     },
     {
-      "slide_num": "5 / 5",
+      "slide_num": "5 / 6",
       "tier_badge": "MAINS ANSWER-BUILDING BLUEPRINT",
       "headline": "GS-II Dialectical Framework",
       "dimensions": [
@@ -124,19 +126,37 @@ def synthesize_article_with_groq(article: ConstitutionalArticleModel) -> dict:
     payload = json.loads(res.json()["choices"][0]["message"]["content"])
 
     # Fallback to DB quote if Groq missed it
-    if not payload["slides"][1].get("cad_quote") and cad_quote:
+    if len(payload.get("slides", [])) > 1 and not payload["slides"][1].get("cad_quote") and cad_quote:
         payload["slides"][1]["cad_quote"] = cad_quote
+
+    # Normalize existing slides to x / 6
+    slides = payload.get("slides", [])
+    for idx, s in enumerate(slides[:5], start=1):
+        s["slide_num"] = f"{idx} / 6"
+
+    # Always ensure Slide 6 (Promotional CTA) is attached
+    if len(slides) == 5:
+        slides.append({
+            "slide_num": "6 / 6",
+            "tier_badge": "JOIN THE ECOSYSTEM",
+            "headline": "MASTER UPSC POLITY WITH AI PRECISION",
+            "subheadline": "Your GS-II Constitutional Intelligence Terminal",
+            "website": "politymentor.com",
+            "telegram": "t.me/polity_mentor_ai",
+            "instagram": "@politymentor_ai"
+        })
+    payload["slides"] = slides
 
     return payload
 
 def render_campaign_slides(article_number: str, slides: list, campaign_id: int) -> list[str]:
-    """Renders all 5 slides to static storage and returns relative URLs."""
+    """Renders all 6 slides to static storage and returns relative URLs."""
     clean_num = article_number.lower().replace(" ", "_").replace(".", "")
     camp_dir = os.path.join(STATIC_OUTPUT_DIR, f"{clean_num}_camp_{campaign_id}")
     os.makedirs(camp_dir, exist_ok=True)
 
     paths = []
-    renderers = [render_slide_1, render_slide_2, render_slide_3, render_slide_4, render_slide_5]
+    renderers = [render_slide_1, render_slide_2, render_slide_3, render_slide_4, render_slide_5, render_slide_6]
     for idx, (slide, render_fn) in enumerate(zip(slides, renderers), start=1):
         rel_path = f"/static/social_previews/{clean_num}_camp_{campaign_id}/slide_{idx}.png"
         abs_path = os.path.join(camp_dir, f"slide_{idx}.png")
@@ -145,18 +165,36 @@ def render_campaign_slides(article_number: str, slides: list, campaign_id: int) 
     return paths
 
 def generate_campaign_for_article(db: Session, article_query: str) -> SocialCampaignQueue:
-    """Manually triggers generation for an article query (e.g., '200' or 'article-200')."""
+    """Manually triggers generation for an article query (e.g., '3', 'Article 3', or 'article-3')."""
+    clean_query = article_query.strip()
+    
+    # Extract digits/alphanumeric clause if someone typed "Article 3" or just "3"
+    digits_match = re.search(r'\d+[A-Za-z]*', clean_query)
+    extracted_num = digits_match.group(0) if digits_match else clean_query
+
+    # 1. First priority: Exact match to prevent "3" matching "356" or "13"
     article = db.query(ConstitutionalArticleModel).filter(
         or_(
-            ConstitutionalArticleModel.article_number.ilike(f"%{article_query}%"),
-            ConstitutionalArticleModel.article_slug.ilike(f"%{article_query}%")
+            ConstitutionalArticleModel.article_number.ilike(f"Article {extracted_num}"),
+            ConstitutionalArticleModel.article_number.ilike(clean_query),
+            ConstitutionalArticleModel.article_slug.ilike(f"article-{extracted_num.lower()}"),
+            ConstitutionalArticleModel.article_slug.ilike(clean_query)
         )
     ).first()
+
+    # 2. Fallback: Broader match if exact match wasn't found
+    if not article:
+        article = db.query(ConstitutionalArticleModel).filter(
+            or_(
+                ConstitutionalArticleModel.article_number.ilike(f"%Article {extracted_num}%"),
+                ConstitutionalArticleModel.article_slug.ilike(f"%{clean_query}%")
+            )
+        ).first()
 
     if not article:
         raise ValueError(f"Article '{article_query}' not found in database.")
 
-    # 1. Groq Synthesis
+    # 1. Groq Synthesis (6 slides)
     payload = synthesize_article_with_groq(article)
     slides = payload.get("slides", [])
 
@@ -178,7 +216,7 @@ def generate_campaign_for_article(db: Session, article_query: str) -> SocialCamp
     db.commit()
     db.refresh(campaign)
 
-    # 3. Render initial images
+    # 3. Render initial images (all 6 slides)
     image_paths = render_campaign_slides(article.article_number, slides, campaign.id)
     campaign.image_paths = image_paths
     db.commit()
