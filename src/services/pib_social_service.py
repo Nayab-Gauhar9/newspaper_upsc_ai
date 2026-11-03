@@ -179,6 +179,9 @@ def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
         render_pib_slide_6
     ]
 
+    # Set expiry to maximum 7 days (60 * 24 * 7 minutes = 10080 minutes)
+    SEVEN_DAYS_MINUTES = 60 * 24 * 7
+
     for idx, (slide, render_fn) in enumerate(zip(slides, renderers), start=1):
         filename = f"slide_{idx}.png"
         local_png_path = os.path.join(scratch_dir, filename)
@@ -189,7 +192,7 @@ def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
         presigned_url = storage.upload_and_get_presigned_url(
             local_file_path=local_png_path,
             object_name=object_key,
-            expiry_minutes=60
+            expiry_minutes=SEVEN_DAYS_MINUTES
         )
         urls.append(presigned_url)
 

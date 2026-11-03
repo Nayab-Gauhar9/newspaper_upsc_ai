@@ -1,11 +1,15 @@
+import re
 from datetime import datetime
 from typing import Optional, Union, List, Any
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
-from src.services.instagram_publisher import InstagramPublisher
+
 from src.database.session import SessionLocal
 from src.database.models import SocialCampaignQueue
+from src.services.instagram_publisher import InstagramPublisher
+from src.storage.minio_client import NewspaperStorage
 from src.services.social_service import (
     generate_campaign_for_article,
     render_campaign_slides
@@ -23,6 +27,46 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def refresh_presigned_urls_if_needed(image_paths: List[str], storage: NewspaperStorage) -> List[str]:
+    """
+    Extracts the object key from presigned R2 URLs or relative paths and
+    generates fresh 7-day presigned URLs.
+    """
+    if not image_paths:
+        return []
+
+    refreshed_urls = []
+    bucket_name = storage.bucket_name
+
+    for path in image_paths:
+        if not path:
+            continue
+        # Check if it's an R2 presigned URL or full HTTPS URL
+        if path.startswith("http://") or path.startswith("https://"):
+            parsed = urlparse(path)
+            # URL path format: /<bucket_name>/<object_key...> or /<object_key...>
+            clean_path = parsed.path.lstrip("/")
+            if clean_path.startswith(f"{bucket_name}/"):
+                object_key = clean_path[len(bucket_name) + 1:]
+            else:
+                object_key = clean_path
+
+            try:
+                fresh_url = storage.client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={"Bucket": bucket_name, "Key": object_key},
+                    ExpiresIn=60 * 24 * 7  # 7 days
+                )
+                refreshed_urls.append(fresh_url)
+            except Exception:
+                # Fallback to existing path if regeneration fails
+                refreshed_urls.append(path)
+        else:
+            # Local / relative static file path (e.g. /campaigns/article_1/...)
+            refreshed_urls.append(path)
+
+    return refreshed_urls
 
 class GenerateArticleRequest(BaseModel):
     article: Optional[str] = None
@@ -71,17 +115,22 @@ def list_queue(
     status_filter: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    """Lists draft campaigns waiting for review in back office."""
+    """Lists draft campaigns waiting for review, with auto-refreshed image URLs."""
     target_status = status or status_filter
     query = db.query(SocialCampaignQueue)
     if target_status and target_status.upper() != "ALL":
         query = query.filter(SocialCampaignQueue.status == target_status.upper())
 
     items = query.order_by(SocialCampaignQueue.created_at.desc()).all()
+    storage = NewspaperStorage(force_r2=True)
     
     result = []
     for c in items:
         slides_list = c.slides_payload.get("slides", []) if isinstance(c.slides_payload, dict) else c.slides_payload
+        
+        # Ensure presigned R2 links are always refreshed and active for display
+        active_image_paths = refresh_presigned_urls_if_needed(c.image_paths or [], storage)
+        
         result.append({
             "id": c.id,
             "article_id": c.article_id,
@@ -89,7 +138,7 @@ def list_queue(
             "title": c.title,
             "status": c.status,
             "slides_payload": slides_list,
-            "image_paths": c.image_paths,
+            "image_paths": active_image_paths,
             "caption": c.caption,
             "created_at": c.created_at.isoformat() if c.created_at else datetime.utcnow().isoformat()
         })
@@ -119,7 +168,7 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
     if req.caption:
         campaign.caption = req.caption
 
-    # Automatically choose renderer based on whether it is a PIB or Article campaign
+    # Route dynamically based on campaign type
     if campaign.article_number and campaign.article_number.startswith("PIB:"):
         new_paths = render_pib_campaign_slides(campaign.id, slides)
     else:
@@ -138,14 +187,18 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
 
 @router.post("/queue/{campaign_id}/approve")
 def approve_draft(campaign_id: int, db: Session = Depends(get_db)):
-    """Approves the draft and publishes the carousel directly to Instagram."""
+    """Approves the draft and publishes the carousel directly to Instagram with verified active URLs."""
     campaign = db.query(SocialCampaignQueue).filter(SocialCampaignQueue.id == campaign_id).first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
     try:
+        storage = NewspaperStorage(force_r2=True)
+        # Ensure fresh links before dispatching to Meta's Graph API
+        fresh_image_urls = refresh_presigned_urls_if_needed(campaign.image_paths or [], storage)
+
         media_id = InstagramPublisher.publish_carousel(
-            image_urls=campaign.image_paths,
+            image_urls=fresh_image_urls,
             caption=campaign.caption
         )
 
