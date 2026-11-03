@@ -1,3 +1,4 @@
+import os
 import re
 from datetime import datetime
 from typing import Optional, Union, List, Any
@@ -5,7 +6,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
-import os
+
 from src.database.session import SessionLocal
 from src.database.models import SocialCampaignQueue
 from src.services.instagram_publisher import InstagramPublisher
@@ -28,58 +29,30 @@ def get_db():
     finally:
         db.close()
 
-def refresh_presigned_urls_if_needed(image_paths: List[str], storage: NewspaperStorage) -> List[str]:
-    """
-    Extracts the object key from presigned R2 URLs or relative paths and
-    generates fresh 7-day presigned URLs without relying on missing bucket attributes.
-    """
-    if not image_paths:
-        return []
+def ensure_cdn_url(path: str) -> str:
+    """Converts any path or legacy presigned R2 URL to a clean media.politymentor.com URL."""
+    if not path:
+        return ""
+    
+    cdn_base = os.getenv("R2_PUBLIC_DOMAIN", "https://media.politymentor.com").rstrip("/")
 
-    # Detect the bucket/target name safely
-    bucket = getattr(storage, "target_name", None) or getattr(storage, "r2_bucket_name", None) or os.getenv("R2_BUCKET_NAME", "upsc-ai")
+    # If it is already a clean CDN URL, return directly
+    if path.startswith(cdn_base):
+        return path
 
-    refreshed_urls = []
-    for path in image_paths:
-        if not path:
-            continue
+    # If it is a Cloudflare R2 presigned URL, strip out query signatures and bucket prefixes
+    if "r2.cloudflarestorage.com" in path:
+        clean_path = urlparse(path).path.lstrip("/")
+        bucket = os.getenv("R2_BUCKET_NAME", "upsc-ai")
+        if clean_path.startswith(f"{bucket}/"):
+            clean_path = clean_path[len(bucket) + 1:]
+        return f"{cdn_base}/{clean_path}"
 
-        if path.startswith("http://") or path.startswith("https://"):
-            parsed = urlparse(path)
-            clean_path = parsed.path.lstrip("/")
-            
-            # Strip bucket prefix if present in the URL path (e.g., /upsc-ai/campaigns/...)
-            if clean_path.startswith(f"{bucket}/"):
-                object_key = clean_path[len(bucket) + 1:]
-            else:
-                object_key = clean_path
+    # If it's a relative object key
+    if path.startswith("campaigns/"):
+        return f"{cdn_base}/{path}"
 
-            try:
-                # 1. Prefer NewspaperStorage's own method if it exists
-                if hasattr(storage, "get_presigned_url"):
-                    fresh_url = storage.get_presigned_url(object_key, expiry_minutes=60 * 24 * 7)
-                elif hasattr(storage, "client") and hasattr(storage.client, "generate_presigned_url"):
-                    fresh_url = storage.client.generate_presigned_url(
-                        ClientMethod="get_object",
-                        Params={"Bucket": bucket, "Key": object_key},
-                        ExpiresIn=60 * 24 * 7
-                    )
-                elif hasattr(storage, "s3_client") and hasattr(storage.s3_client, "generate_presigned_url"):
-                    fresh_url = storage.s3_client.generate_presigned_url(
-                        ClientMethod="get_object",
-                        Params={"Bucket": bucket, "Key": object_key},
-                        ExpiresIn=60 * 24 * 7
-                    )
-                else:
-                    fresh_url = path
-                
-                refreshed_urls.append(fresh_url)
-            except Exception:
-                refreshed_urls.append(path)
-        else:
-            refreshed_urls.append(path)
-
-    return refreshed_urls
+    return path
 
 class GenerateArticleRequest(BaseModel):
     article: Optional[str] = None
@@ -113,7 +86,7 @@ def generate_draft(req: GenerateArticleRequest, db: Session = Depends(get_db)):
             "id": campaign.id,
             "article_number": campaign.article_number,
             "slides_payload": campaign.slides_payload.get("slides", []) if isinstance(campaign.slides_payload, dict) else campaign.slides_payload,
-            "image_paths": campaign.image_paths,
+            "image_paths": [ensure_cdn_url(p) for p in (campaign.image_paths or [])],
             "caption": campaign.caption,
             "created_at": campaign.created_at.isoformat()
         }
@@ -128,21 +101,18 @@ def list_queue(
     status_filter: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    """Lists draft campaigns waiting for review, with auto-refreshed image URLs."""
+    """Lists draft campaigns waiting for review, with permanent CDN image URLs."""
     target_status = status or status_filter
     query = db.query(SocialCampaignQueue)
     if target_status and target_status.upper() != "ALL":
         query = query.filter(SocialCampaignQueue.status == target_status.upper())
 
     items = query.order_by(SocialCampaignQueue.created_at.desc()).all()
-    storage = NewspaperStorage(force_r2=True)
     
     result = []
     for c in items:
         slides_list = c.slides_payload.get("slides", []) if isinstance(c.slides_payload, dict) else c.slides_payload
-        
-        # Ensure presigned R2 links are always refreshed and active for display
-        active_image_paths = refresh_presigned_urls_if_needed(c.image_paths or [], storage)
+        cdn_images = [ensure_cdn_url(p) for p in (c.image_paths or [])]
         
         result.append({
             "id": c.id,
@@ -151,7 +121,7 @@ def list_queue(
             "title": c.title,
             "status": c.status,
             "slides_payload": slides_list,
-            "image_paths": active_image_paths,
+            "image_paths": cdn_images,
             "caption": c.caption,
             "created_at": c.created_at.isoformat() if c.created_at else datetime.utcnow().isoformat()
         })
@@ -187,35 +157,39 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
     else:
         new_paths = render_campaign_slides(campaign.article_number, slides, campaign.id)
 
-    campaign.image_paths = new_paths
+    cdn_paths = [ensure_cdn_url(p) for p in new_paths]
+    campaign.image_paths = cdn_paths
     db.commit()
     db.refresh(campaign)
 
     return {
         "status": "success",
         "message": "Content updated and slides re-rendered.",
-        "image_paths": new_paths,
+        "image_paths": cdn_paths,
         "slides_payload": payload_to_store
     }
 
 @router.post("/queue/{campaign_id}/approve")
 def approve_draft(campaign_id: int, db: Session = Depends(get_db)):
-    """Approves the draft and publishes the carousel directly to Instagram with verified active URLs."""
+    """Approves draft and publishes clean CDN URLs directly to Instagram Graph API."""
     campaign = db.query(SocialCampaignQueue).filter(SocialCampaignQueue.id == campaign_id).first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
     try:
-        storage = NewspaperStorage(force_r2=True)
-        # Ensure fresh links before dispatching to Meta's Graph API
-        fresh_image_urls = refresh_presigned_urls_if_needed(campaign.image_paths or [], storage)
+        # Convert all image paths to public CDN URLs
+        cdn_urls = [ensure_cdn_url(p) for p in (campaign.image_paths or [])]
+        
+        if not cdn_urls or len(cdn_urls) < 6:
+            raise HTTPException(status_code=400, detail="Campaign missing 6 slide images.")
 
         media_id = InstagramPublisher.publish_carousel(
-            image_urls=fresh_image_urls,
+            image_urls=cdn_urls,
             caption=campaign.caption
         )
 
         campaign.status = "PUBLISHED"
+        campaign.image_paths = cdn_urls
         campaign.approved_at = datetime.utcnow()
         db.commit()
 
@@ -233,7 +207,7 @@ def approve_draft(campaign_id: int, db: Session = Depends(get_db)):
 def generate_latest_pib_draft(db: Session = Depends(get_db)):
     """
     Fetches the latest PIB smart note from R2, generates slides deterministically,
-    renders them to R2, and queues the draft with status PENDING_APPROVAL.
+    renders them to R2 with media.politymentor.com URLs, and queues for approval.
     """
     try:
         campaign = generate_campaign_for_latest_pib(db)
@@ -245,7 +219,7 @@ def generate_latest_pib_draft(db: Session = Depends(get_db)):
             "title": campaign.title,
             "article_number": campaign.article_number,
             "slides_payload": campaign.slides_payload.get("slides", []),
-            "image_paths": campaign.image_paths,
+            "image_paths": [ensure_cdn_url(p) for p in (campaign.image_paths or [])],
             "caption": campaign.caption,
             "status": campaign.status
         }

@@ -179,8 +179,8 @@ def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
         render_pib_slide_6
     ]
 
-    # Set expiry to maximum 7 days (60 * 24 * 7 minutes = 10080 minutes)
-    SEVEN_DAYS_MINUTES = 60 * 24 * 7
+    # Active Cloudflare R2 Public CDN Domain
+    cdn_base = os.getenv("R2_PUBLIC_DOMAIN", "https://media.politymentor.com").rstrip("/")
 
     for idx, (slide, render_fn) in enumerate(zip(slides, renderers), start=1):
         filename = f"slide_{idx}.png"
@@ -189,12 +189,16 @@ def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
         render_fn(slide, local_png_path)
 
         object_key = f"campaigns/pib/camp_{campaign_id}/{filename}"
-        presigned_url = storage.upload_and_get_presigned_url(
-            local_file_path=local_png_path,
-            object_name=object_key,
-            expiry_minutes=SEVEN_DAYS_MINUTES
-        )
-        urls.append(presigned_url)
+        
+        # Upload directly to R2 bucket
+        if hasattr(storage, "upload_file"):
+            storage.upload_file(local_file_path=local_png_path, object_name=object_key)
+        else:
+            storage.upload_and_get_presigned_url(local_file_path=local_png_path, object_name=object_key)
+
+        # Permanent, unexpired public CDN link
+        public_cdn_url = f"{cdn_base}/{object_key}"
+        urls.append(public_cdn_url)
 
     return urls
 
