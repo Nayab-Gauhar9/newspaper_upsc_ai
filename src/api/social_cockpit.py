@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
-
+import os
 from src.database.session import SessionLocal
 from src.database.models import SocialCampaignQueue
 from src.services.instagram_publisher import InstagramPublisher
@@ -31,39 +31,52 @@ def get_db():
 def refresh_presigned_urls_if_needed(image_paths: List[str], storage: NewspaperStorage) -> List[str]:
     """
     Extracts the object key from presigned R2 URLs or relative paths and
-    generates fresh 7-day presigned URLs.
+    generates fresh 7-day presigned URLs without relying on missing bucket attributes.
     """
     if not image_paths:
         return []
 
-    refreshed_urls = []
-    bucket_name = storage.bucket_name
+    # Detect the bucket/target name safely
+    bucket = getattr(storage, "target_name", None) or getattr(storage, "r2_bucket_name", None) or os.getenv("R2_BUCKET_NAME", "upsc-ai")
 
+    refreshed_urls = []
     for path in image_paths:
         if not path:
             continue
-        # Check if it's an R2 presigned URL or full HTTPS URL
+
         if path.startswith("http://") or path.startswith("https://"):
             parsed = urlparse(path)
-            # URL path format: /<bucket_name>/<object_key...> or /<object_key...>
             clean_path = parsed.path.lstrip("/")
-            if clean_path.startswith(f"{bucket_name}/"):
-                object_key = clean_path[len(bucket_name) + 1:]
+            
+            # Strip bucket prefix if present in the URL path (e.g., /upsc-ai/campaigns/...)
+            if clean_path.startswith(f"{bucket}/"):
+                object_key = clean_path[len(bucket) + 1:]
             else:
                 object_key = clean_path
 
             try:
-                fresh_url = storage.client.generate_presigned_url(
-                    ClientMethod="get_object",
-                    Params={"Bucket": bucket_name, "Key": object_key},
-                    ExpiresIn=60 * 24 * 7  # 7 days
-                )
+                # 1. Prefer NewspaperStorage's own method if it exists
+                if hasattr(storage, "get_presigned_url"):
+                    fresh_url = storage.get_presigned_url(object_key, expiry_minutes=60 * 24 * 7)
+                elif hasattr(storage, "client") and hasattr(storage.client, "generate_presigned_url"):
+                    fresh_url = storage.client.generate_presigned_url(
+                        ClientMethod="get_object",
+                        Params={"Bucket": bucket, "Key": object_key},
+                        ExpiresIn=60 * 24 * 7
+                    )
+                elif hasattr(storage, "s3_client") and hasattr(storage.s3_client, "generate_presigned_url"):
+                    fresh_url = storage.s3_client.generate_presigned_url(
+                        ClientMethod="get_object",
+                        Params={"Bucket": bucket, "Key": object_key},
+                        ExpiresIn=60 * 24 * 7
+                    )
+                else:
+                    fresh_url = path
+                
                 refreshed_urls.append(fresh_url)
             except Exception:
-                # Fallback to existing path if regeneration fails
                 refreshed_urls.append(path)
         else:
-            # Local / relative static file path (e.g. /campaigns/article_1/...)
             refreshed_urls.append(path)
 
     return refreshed_urls
