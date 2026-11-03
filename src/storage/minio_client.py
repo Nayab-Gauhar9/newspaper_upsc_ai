@@ -2,7 +2,7 @@ from io import BytesIO
 import json
 import os
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from minio import Minio
 from minio.error import S3Error
@@ -135,3 +135,39 @@ class NewspaperStorage:
             return self.get_json(object_name)
         except Exception:
             return None
+    def upload_and_get_presigned_url(self, local_file_path: str, object_name: str, expiry_minutes: int = 20) -> str:
+        """
+        Uploads slide to R2 and generates a temporary presigned HTTPS GET URL
+        that Meta's crawler can read directly without needing a public bucket.
+        """
+        # 1. Upload slide PNG to R2
+        self.client.fput_object(
+            self.bucket,
+            object_name,
+            local_file_path,
+            content_type="image/png"
+        )
+
+        # 2. Generate signed temporary GET URL using your R2 keys
+        presigned_url = self.client.presigned_get_object(
+            self.bucket,
+            object_name,
+            expires=timedelta(minutes=expiry_minutes)
+        )
+        return presigned_url
+
+    def get_latest_pib_smart_note(self, prefix: str = "pib/smart_notes/") -> tuple[dict, str]:
+        """
+        Scans R2 for the most recent PIB smart note JSON by object last_modified timestamp.
+        Returns a tuple of (note_data_dict, object_key).
+        """
+        objects = list(self.client.list_objects(self.bucket, prefix=prefix, recursive=True))
+        json_objs = [obj for obj in objects if obj.object_name.endswith(".json")]
+        
+        if not json_objs:
+            raise FileNotFoundError(f"No PIB smart notes found under prefix: {prefix}")
+            
+        # Pick the most recently modified object
+        latest_obj = max(json_objs, key=lambda x: x.last_modified)
+        data = self.get_json(latest_obj.object_name)
+        return data, latest_obj.object_name

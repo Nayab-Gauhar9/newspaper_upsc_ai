@@ -3,10 +3,17 @@ from typing import Optional, Union, List, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
-
+from src.services.instagram_publisher import InstagramPublisher
 from src.database.session import SessionLocal
 from src.database.models import SocialCampaignQueue
-from src.services.social_service import generate_campaign_for_article, render_campaign_slides
+from src.services.social_service import (
+    generate_campaign_for_article,
+    render_campaign_slides
+)
+from src.services.pib_social_service import (
+    generate_campaign_for_latest_pib,
+    render_pib_campaign_slides
+)
 
 router = APIRouter(prefix="/api/admin/social", tags=["Social Cockpit"])
 
@@ -74,7 +81,6 @@ def list_queue(
     
     result = []
     for c in items:
-        # Extract flat list of slides if wrapped in {"slides": [...]}
         slides_list = c.slides_payload.get("slides", []) if isinstance(c.slides_payload, dict) else c.slides_payload
         result.append({
             "id": c.id,
@@ -96,7 +102,6 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
-    # 1. Unpack slides list safely
     if isinstance(req.slides_payload, dict):
         slides = req.slides_payload.get("slides", [])
         payload_to_store = req.slides_payload
@@ -114,10 +119,13 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
     if req.caption:
         campaign.caption = req.caption
 
-    # 2. Re-render PNG images with the edited slide content
-    new_paths = render_campaign_slides(campaign.article_number, slides, campaign.id)
-    campaign.image_paths = new_paths
+    # Automatically choose renderer based on whether it is a PIB or Article campaign
+    if campaign.article_number and campaign.article_number.startswith("PIB:"):
+        new_paths = render_pib_campaign_slides(campaign.id, slides)
+    else:
+        new_paths = render_campaign_slides(campaign.article_number, slides, campaign.id)
 
+    campaign.image_paths = new_paths
     db.commit()
     db.refresh(campaign)
 
@@ -130,16 +138,50 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
 
 @router.post("/queue/{campaign_id}/approve")
 def approve_draft(campaign_id: int, db: Session = Depends(get_db)):
-    """Approves the draft. It will not be posted anywhere until approved."""
+    """Approves the draft and publishes the carousel directly to Instagram."""
     campaign = db.query(SocialCampaignQueue).filter(SocialCampaignQueue.id == campaign_id).first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
-    campaign.status = "APPROVED"
-    campaign.approved_at = datetime.utcnow()
-    db.commit()
+    try:
+        media_id = InstagramPublisher.publish_carousel(
+            image_urls=campaign.image_paths,
+            caption=campaign.caption
+        )
 
-    return {
-        "status": "success",
-        "message": f"Campaign #{campaign.id} ({campaign.article_number}) approved for publishing."
-    }
+        campaign.status = "PUBLISHED"
+        campaign.approved_at = datetime.utcnow()
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": f"Campaign #{campaign.id} ({campaign.article_number}) published to Instagram!",
+            "media_id": media_id
+        }
+    except Exception as e:
+        campaign.status = "FAILED"
+        db.commit()
+        raise HTTPException(status_code=500, detail=f"Instagram publishing failed: {str(e)}")
+
+@router.post("/generate/pib-latest")
+def generate_latest_pib_draft(db: Session = Depends(get_db)):
+    """
+    Fetches the latest PIB smart note from R2, generates slides deterministically,
+    renders them to R2, and queues the draft with status PENDING_APPROVAL.
+    """
+    try:
+        campaign = generate_campaign_for_latest_pib(db)
+        return {
+            "status": "success",
+            "message": f"Draft created for {campaign.article_number}: {campaign.title}",
+            "campaign_id": campaign.id,
+            "id": campaign.id,
+            "title": campaign.title,
+            "article_number": campaign.article_number,
+            "slides_payload": campaign.slides_payload.get("slides", []),
+            "image_paths": campaign.image_paths,
+            "caption": campaign.caption,
+            "status": campaign.status
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PIB draft generation failed: {str(e)}")

@@ -1,11 +1,14 @@
 import os
 import re
 import json
+import tempfile
+import requests
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from src.database.models import ConstitutionalArticleModel, SocialCampaignQueue
+from src.storage.minio_client import NewspaperStorage
 from src.services.social_slide_renderer import (
     render_slide_1,
     render_slide_2,
@@ -15,11 +18,7 @@ from src.services.social_slide_renderer import (
     render_slide_6
 )
 
-# Groq API endpoint
-import requests
-
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-STATIC_OUTPUT_DIR = os.path.join("static", "social_previews")
 
 GROQ_SYSTEM_PROMPT = """
 You are a senior constitutional scholar and UPSC GS-II mentor.
@@ -125,16 +124,13 @@ def synthesize_article_with_groq(article: ConstitutionalArticleModel) -> dict:
     res.raise_for_status()
     payload = json.loads(res.json()["choices"][0]["message"]["content"])
 
-    # Fallback to DB quote if Groq missed it
     if len(payload.get("slides", [])) > 1 and not payload["slides"][1].get("cad_quote") and cad_quote:
         payload["slides"][1]["cad_quote"] = cad_quote
 
-    # Normalize existing slides to x / 6
     slides = payload.get("slides", [])
     for idx, s in enumerate(slides[:5], start=1):
         s["slide_num"] = f"{idx} / 6"
 
-    # Always ensure Slide 6 (Promotional CTA) is attached
     if len(slides) == 5:
         slides.append({
             "slide_num": "6 / 6",
@@ -150,29 +146,41 @@ def synthesize_article_with_groq(article: ConstitutionalArticleModel) -> dict:
     return payload
 
 def render_campaign_slides(article_number: str, slides: list, campaign_id: int) -> list[str]:
-    """Renders all 6 slides to static storage and returns relative URLs."""
+    """
+    Renders all 6 slides to temporary storage, uploads each to Cloudflare R2,
+    and returns presigned HTTPS URLs ready for Meta's Graph API.
+    """
     clean_num = article_number.lower().replace(" ", "_").replace(".", "")
-    camp_dir = os.path.join(STATIC_OUTPUT_DIR, f"{clean_num}_camp_{campaign_id}")
-    os.makedirs(camp_dir, exist_ok=True)
+    scratch_dir = os.path.join(tempfile.gettempdir(), f"{clean_num}_camp_{campaign_id}")
+    os.makedirs(scratch_dir, exist_ok=True)
 
-    paths = []
+    storage = NewspaperStorage(force_r2=True)
+    urls = []
     renderers = [render_slide_1, render_slide_2, render_slide_3, render_slide_4, render_slide_5, render_slide_6]
+
     for idx, (slide, render_fn) in enumerate(zip(slides, renderers), start=1):
-        rel_path = f"/static/social_previews/{clean_num}_camp_{campaign_id}/slide_{idx}.png"
-        abs_path = os.path.join(camp_dir, f"slide_{idx}.png")
-        render_fn(slide, abs_path)
-        paths.append(rel_path)
-    return paths
+        filename = f"slide_{idx}.png"
+        local_png_path = os.path.join(scratch_dir, filename)
+
+        render_fn(slide, local_png_path)
+
+        object_key = f"campaigns/{clean_num}/camp_{campaign_id}/{filename}"
+        presigned_url = storage.upload_and_get_presigned_url(
+            local_file_path=local_png_path,
+            object_name=object_key,
+            expiry_minutes=60
+        )
+        urls.append(presigned_url)
+
+    return urls
 
 def generate_campaign_for_article(db: Session, article_query: str) -> SocialCampaignQueue:
     """Manually triggers generation for an article query (e.g., '3', 'Article 3', or 'article-3')."""
     clean_query = article_query.strip()
     
-    # Extract digits/alphanumeric clause if someone typed "Article 3" or just "3"
     digits_match = re.search(r'\d+[A-Za-z]*', clean_query)
     extracted_num = digits_match.group(0) if digits_match else clean_query
 
-    # 1. First priority: Exact match to prevent "3" matching "356" or "13"
     article = db.query(ConstitutionalArticleModel).filter(
         or_(
             ConstitutionalArticleModel.article_number.ilike(f"Article {extracted_num}"),
@@ -182,7 +190,6 @@ def generate_campaign_for_article(db: Session, article_query: str) -> SocialCamp
         )
     ).first()
 
-    # 2. Fallback: Broader match if exact match wasn't found
     if not article:
         article = db.query(ConstitutionalArticleModel).filter(
             or_(
@@ -194,11 +201,9 @@ def generate_campaign_for_article(db: Session, article_query: str) -> SocialCamp
     if not article:
         raise ValueError(f"Article '{article_query}' not found in database.")
 
-    # 1. Groq Synthesis (6 slides)
     payload = synthesize_article_with_groq(article)
     slides = payload.get("slides", [])
 
-    # 2. Persist queue row
     campaign = SocialCampaignQueue(
         article_id=article.id,
         article_number=article.article_number,
@@ -216,9 +221,8 @@ def generate_campaign_for_article(db: Session, article_query: str) -> SocialCamp
     db.commit()
     db.refresh(campaign)
 
-    # 3. Render initial images (all 6 slides)
-    image_paths = render_campaign_slides(article.article_number, slides, campaign.id)
-    campaign.image_paths = image_paths
+    image_urls = render_campaign_slides(article.article_number, slides, campaign.id)
+    campaign.image_paths = image_urls
     db.commit()
     db.refresh(campaign)
 
