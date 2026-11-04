@@ -8,7 +8,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from src.database.session import SessionLocal
-from src.database.models import SocialCampaignQueue
+from src.database.models import SocialCampaignQueue, PrelimsTrapMatrix
 from src.services.instagram_publisher import InstagramPublisher
 from src.storage.minio_client import NewspaperStorage
 from src.services.social_service import (
@@ -19,6 +19,16 @@ from src.services.pib_social_service import (
     generate_campaign_for_latest_pib,
     render_pib_campaign_slides
 )
+from src.services.dossier_social_service import (
+    synthesize_dossier_with_groq,
+    render_dossier_campaign_slides
+)
+from src.services.trap_engine_service import (
+    generate_analytical_trap_from_article,
+    generate_analytical_trap_from_dossier,
+    generate_analytical_trap_from_pyq
+)
+from src.services.trap_slide_renderer import render_trap_campaign_slides
 
 router = APIRouter(prefix="/api/admin/social", tags=["Social Cockpit"])
 
@@ -54,6 +64,9 @@ def ensure_cdn_url(path: str) -> str:
 
     return path
 
+# ---------------------------------------------------------------------------
+# REQUEST SCHEMAS
+# ---------------------------------------------------------------------------
 class GenerateArticleRequest(BaseModel):
     article: Optional[str] = None
     article_number: Optional[str] = None
@@ -69,10 +82,28 @@ class GenerateArticleRequest(BaseModel):
             values["article_number"] = str(article_val).strip()
         return values
 
+class GenerateDossierRequest(BaseModel):
+    issue_slug: str
+
+class GenerateTrapArticleRequest(BaseModel):
+    article: str
+    format: Optional[str] = "STATEMENT_I_II"
+
+class GenerateTrapDossierRequest(BaseModel):
+    issue_slug: str
+    format: Optional[str] = "STATEMENT_I_II"
+
+class GenerateTrapPyqRequest(BaseModel):
+    pyq_id: int
+    format: Optional[str] = "STATEMENT_I_II"
+
 class AmendCampaignRequest(BaseModel):
     slides_payload: Union[dict, List[Any]]
     caption: Optional[str] = None
 
+# ---------------------------------------------------------------------------
+# ARTICLE CAMPAIGN ENDPOINTS
+# ---------------------------------------------------------------------------
 @router.post("/generate")
 def generate_draft(req: GenerateArticleRequest, db: Session = Depends(get_db)):
     """Triggers generation for a specific article into PENDING_APPROVAL status."""
@@ -95,6 +126,277 @@ def generate_draft(req: GenerateArticleRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 
+# ---------------------------------------------------------------------------
+# PIB CAMPAIGN ENDPOINTS
+# ---------------------------------------------------------------------------
+@router.post("/generate/pib-latest")
+def generate_latest_pib_draft(db: Session = Depends(get_db)):
+    """
+    Fetches the latest PIB smart note from R2, generates slides deterministically,
+    renders them to R2 with media.politymentor.com URLs, and queues for approval.
+    """
+    try:
+        campaign = generate_campaign_for_latest_pib(db)
+        return {
+            "status": "success",
+            "message": f"Draft created for {campaign.article_number}: {campaign.title}",
+            "campaign_id": campaign.id,
+            "id": campaign.id,
+            "title": campaign.title,
+            "article_number": campaign.article_number,
+            "slides_payload": campaign.slides_payload.get("slides", []),
+            "image_paths": [ensure_cdn_url(p) for p in (campaign.image_paths or [])],
+            "caption": campaign.caption,
+            "status": campaign.status
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PIB draft generation failed: {str(e)}")
+
+# ---------------------------------------------------------------------------
+# LIVING DOSSIER CAMPAIGN ENDPOINTS
+# ---------------------------------------------------------------------------
+@router.post("/generate/dossier")
+def generate_dossier_draft(req: GenerateDossierRequest, db: Session = Depends(get_db)):
+    """Generates an Instagram carousel draft using LLM synthesis directly from an issue dossier and its graph edges."""
+    dossier = db.execute(
+        text("SELECT * FROM issue_dossiers WHERE issue_slug = :slug LIMIT 1"),
+        {"slug": req.issue_slug}
+    ).mappings().first()
+
+    if not dossier:
+        raise HTTPException(status_code=404, detail="Dossier slug not found.")
+
+    edges = db.execute(
+        text("SELECT * FROM issue_graph_edges WHERE issue_slug = :slug ORDER BY event_date ASC"),
+        {"slug": req.issue_slug}
+    ).mappings().all()
+
+    payload = synthesize_dossier_with_groq(dict(dossier), [dict(e) for e in edges])
+    slides = payload["slides"]
+
+    campaign = SocialCampaignQueue(
+        article_id=None,
+        article_number=f"DOSSIER: {dossier['chapter_name']}",
+        title=dossier["title"][:250],
+        status="PENDING_APPROVAL",
+        slides_payload=payload,
+        image_paths=[],
+        caption=(
+            f"Evolving Constitutional Dossier: {dossier['title']}\n\n"
+            f"Status: {dossier['status'].upper()} • {len(edges)} Event Nodes Tracked\n\n"
+            f"Explore the live legal evolution and backward linkages on politymentor.com.\n\n"
+            f"#UPSC #GS2 #PolityMentor #{dossier['chapter_name'].replace(' ', '')}"
+        )
+    )
+    db.add(campaign)
+    db.commit()
+    db.refresh(campaign)
+
+    cdn_urls = render_dossier_campaign_slides(campaign.id, slides)
+    campaign.image_paths = cdn_urls
+    db.commit()
+    db.refresh(campaign)
+
+    return {
+        "status": "success",
+        "campaign_id": campaign.id,
+        "title": campaign.title,
+        "image_paths": cdn_urls,
+        "slides_payload": payload
+    }
+
+# ---------------------------------------------------------------------------
+# DISTRACTOR TRAP ENGINE ENDPOINTS
+# ---------------------------------------------------------------------------
+@router.post("/generate/trap/article")
+def generate_trap_article_draft(req: GenerateTrapArticleRequest, db: Session = Depends(get_db)):
+    """Synthesizes a 4-slide Distractor Trap carousel from a constitutional article."""
+    try:
+        payload = generate_analytical_trap_from_article(db, req.article, preferred_format=req.format)
+
+        trap_row = PrelimsTrapMatrix(
+            source_type="ARTICLE",
+            source_ref_id=req.article,
+            topic=payload["topic"],
+            chapter_name="Indian Polity",
+            question_format=payload["question_format"],
+            question_stem=payload["question_stem"],
+            statements_payload=payload["statements_payload"],
+            options=payload["options"],
+            correct_option=payload["correct_option"],
+            trap_archetype=payload["trap_archetype"],
+            conceptual_analysis=payload["conceptual_analysis"],
+            elimination_heuristic=payload["elimination_heuristic"],
+            source_citation=payload["source_citation"],
+            status="PENDING"
+        )
+        db.add(trap_row)
+        db.commit()
+        db.refresh(trap_row)
+
+        campaign = SocialCampaignQueue(
+            article_id=None,
+            article_number=f"TRAP: {req.article}",
+            title=f"Prelims Trap: {payload['topic']}",
+            status="PENDING_APPROVAL",
+            slides_payload=payload,
+            image_paths=[],
+            caption=(
+                f"Daily UPSC Prelims Distractor Trap: {payload['topic']}\n\n"
+                f"Over 70% of candidates fall for this cognitive blindspot. Can you crack the constitutional ratio?\n\n"
+                f"Swipe to uncover the trap and the authentic bare act rule.\n\n"
+                f"#UPSC #Prelims #IndianPolity #PolityMentor #UPSC2026"
+            )
+        )
+        db.add(campaign)
+        db.commit()
+        db.refresh(campaign)
+
+        trap_row.social_campaign_id = campaign.id
+        cdn_urls = render_trap_campaign_slides(campaign.id, payload)
+        campaign.image_paths = cdn_urls
+        db.commit()
+
+        return {
+            "status": "success",
+            "trap_id": trap_row.id,
+            "campaign_id": campaign.id,
+            "title": campaign.title,
+            "image_paths": cdn_urls,
+            "payload": payload
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Trap generation failed: {str(e)}")
+
+@router.post("/generate/trap/dossier")
+def generate_trap_dossier_draft(req: GenerateTrapDossierRequest, db: Session = Depends(get_db)):
+    """Synthesizes a 4-slide Distractor Trap carousel from an evolving dossier."""
+    try:
+        payload = generate_analytical_trap_from_dossier(db, req.issue_slug, preferred_format=req.format)
+
+        trap_row = PrelimsTrapMatrix(
+            source_type="DOSSIER",
+            source_ref_id=req.issue_slug,
+            topic=payload["topic"],
+            chapter_name="Governance & Polity",
+            question_format=payload["question_format"],
+            question_stem=payload["question_stem"],
+            statements_payload=payload["statements_payload"],
+            options=payload["options"],
+            correct_option=payload["correct_option"],
+            trap_archetype=payload["trap_archetype"],
+            conceptual_analysis=payload["conceptual_analysis"],
+            elimination_heuristic=payload["elimination_heuristic"],
+            source_citation=payload["source_citation"],
+            status="PENDING"
+        )
+        db.add(trap_row)
+        db.commit()
+        db.refresh(trap_row)
+
+        campaign = SocialCampaignQueue(
+            article_id=None,
+            article_number=f"TRAP: {req.issue_slug[:20]}",
+            title=f"Dispute Trap: {payload['topic']}",
+            status="PENDING_APPROVAL",
+            slides_payload=payload,
+            image_paths=[],
+            caption=(
+                f"Evolving Dispute Distractor Trap: {payload['topic']}\n\n"
+                f"Analyzing the constitutional friction in recent litigation.\n\n"
+                f"Swipe for the breakdown and heuristic elimination rule.\n\n"
+                f"#UPSC #PolityMentor #GS2 #ConstitutionalLaw"
+            )
+        )
+        db.add(campaign)
+        db.commit()
+        db.refresh(campaign)
+
+        trap_row.social_campaign_id = campaign.id
+        cdn_urls = render_trap_campaign_slides(campaign.id, payload)
+        campaign.image_paths = cdn_urls
+        db.commit()
+
+        return {
+            "status": "success",
+            "trap_id": trap_row.id,
+            "campaign_id": campaign.id,
+            "title": campaign.title,
+            "image_paths": cdn_urls,
+            "payload": payload
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Trap generation failed: {str(e)}")
+
+@router.post("/generate/trap/pyq")
+def generate_trap_pyq_draft(req: GenerateTrapPyqRequest, db: Session = Depends(get_db)):
+    """Synthesizes a 4-slide Distractor Trap carousel by mutating an authentic UPSC Prelims PYQ."""
+    try:
+        payload = generate_analytical_trap_from_pyq(db, req.pyq_id, preferred_format=req.format)
+
+        trap_row = PrelimsTrapMatrix(
+            source_type="PYQ_MUTATION",
+            source_ref_id=str(req.pyq_id),
+            topic=payload["topic"],
+            chapter_name="PYQ Deconstruction",
+            question_format=payload["question_format"],
+            question_stem=payload["question_stem"],
+            statements_payload=payload["statements_payload"],
+            options=payload["options"],
+            correct_option=payload["correct_option"],
+            trap_archetype=payload["trap_archetype"],
+            conceptual_analysis=payload["conceptual_analysis"],
+            elimination_heuristic=payload["elimination_heuristic"],
+            source_citation=payload["source_citation"],
+            status="PENDING"
+        )
+        db.add(trap_row)
+        db.commit()
+        db.refresh(trap_row)
+
+        campaign = SocialCampaignQueue(
+            article_id=None,
+            article_number=f"TRAP: PYQ-{req.pyq_id}",
+            title=f"PYQ Variant: {payload['topic']}",
+            status="PENDING_APPROVAL",
+            slides_payload=payload,
+            image_paths=[],
+            caption=(
+                f"UPSC Prelims PYQ Trap Variant: {payload['topic']}\n\n"
+                f"How UPSC inverts standard PYQs to test analytical understanding.\n\n"
+                f"Swipe for the distractor forensic analysis.\n\n"
+                f"#UPSC #PrelimsPYQ #PolityMentor #UPSCStrategy"
+            )
+        )
+        db.add(campaign)
+        db.commit()
+        db.refresh(campaign)
+
+        trap_row.social_campaign_id = campaign.id
+        cdn_urls = render_trap_campaign_slides(campaign.id, payload)
+        campaign.image_paths = cdn_urls
+        db.commit()
+
+        return {
+            "status": "success",
+            "trap_id": trap_row.id,
+            "campaign_id": campaign.id,
+            "title": campaign.title,
+            "image_paths": cdn_urls,
+            "payload": payload
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Trap generation failed: {str(e)}")
+
+# ---------------------------------------------------------------------------
+# QUEUE MANAGEMENT & EDITING
+# ---------------------------------------------------------------------------
 @router.get("/queue")
 def list_queue(
     status: Optional[str] = Query(None),
@@ -135,7 +437,7 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
     if isinstance(req.slides_payload, dict):
-        slides = req.slides_payload.get("slides", [])
+        slides = req.slides_payload.get("slides", req.slides_payload)
         payload_to_store = req.slides_payload
     elif isinstance(req.slides_payload, list):
         slides = req.slides_payload
@@ -151,8 +453,12 @@ def amend_draft(campaign_id: int, req: AmendCampaignRequest, db: Session = Depen
     if req.caption:
         campaign.caption = req.caption
 
-    # Route dynamically based on campaign type
-    if campaign.article_number and campaign.article_number.startswith("PIB:"):
+    # Route dynamically based on campaign archetype
+    if campaign.article_number and campaign.article_number.startswith("TRAP:"):
+        new_paths = render_trap_campaign_slides(campaign.id, payload_to_store)
+    elif campaign.article_number and campaign.article_number.startswith("DOSSIER:"):
+        new_paths = render_dossier_campaign_slides(campaign.id, slides)
+    elif campaign.article_number and campaign.article_number.startswith("PIB:"):
         new_paths = render_pib_campaign_slides(campaign.id, slides)
     else:
         new_paths = render_campaign_slides(campaign.article_number, slides, campaign.id)
@@ -177,11 +483,12 @@ def approve_draft(campaign_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Campaign not found.")
 
     try:
-        # Convert all image paths to public CDN URLs
         cdn_urls = [ensure_cdn_url(p) for p in (campaign.image_paths or [])]
         
-        if not cdn_urls or len(cdn_urls) < 6:
-            raise HTTPException(status_code=400, detail="Campaign missing 6 slide images.")
+        # Traps use 4 slides; Articles, PIB, and Dossiers use 6 slides
+        min_required = 4 if campaign.article_number.startswith("TRAP:") else 6
+        if not cdn_urls or len(cdn_urls) < min_required:
+            raise HTTPException(status_code=400, detail=f"Campaign missing required {min_required} slide images.")
 
         media_id = InstagramPublisher.publish_carousel(
             image_urls=cdn_urls,
@@ -202,91 +509,3 @@ def approve_draft(campaign_id: int, db: Session = Depends(get_db)):
         campaign.status = "FAILED"
         db.commit()
         raise HTTPException(status_code=500, detail=f"Instagram publishing failed: {str(e)}")
-
-@router.post("/generate/pib-latest")
-def generate_latest_pib_draft(db: Session = Depends(get_db)):
-    """
-    Fetches the latest PIB smart note from R2, generates slides deterministically,
-    renders them to R2 with media.politymentor.com URLs, and queues for approval.
-    """
-    try:
-        campaign = generate_campaign_for_latest_pib(db)
-        return {
-            "status": "success",
-            "message": f"Draft created for {campaign.article_number}: {campaign.title}",
-            "campaign_id": campaign.id,
-            "id": campaign.id,
-            "title": campaign.title,
-            "article_number": campaign.article_number,
-            "slides_payload": campaign.slides_payload.get("slides", []),
-            "image_paths": [ensure_cdn_url(p) for p in (campaign.image_paths or [])],
-            "caption": campaign.caption,
-            "status": campaign.status
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PIB draft generation failed: {str(e)}")
-
-from sqlalchemy import text
-from pydantic import BaseModel
-from src.services.dossier_social_service import (
-    synthesize_dossier_with_groq,
-    render_dossier_campaign_slides
-)
-
-class GenerateDossierRequest(BaseModel):
-    issue_slug: str
-
-@router.post("/generate/dossier")
-def generate_dossier_draft(req: GenerateDossierRequest, db: Session = Depends(get_db)):
-    """Generates an Instagram carousel draft using LLM synthesis directly from an issue dossier and its graph edges."""
-    # 1. Fetch Dossier wrapped with text()
-    dossier = db.execute(
-        text("SELECT * FROM issue_dossiers WHERE issue_slug = :slug LIMIT 1"),
-        {"slug": req.issue_slug}
-    ).mappings().first()
-
-    if not dossier:
-        raise HTTPException(status_code=404, detail="Dossier slug not found.")
-
-    # 2. Fetch Edges wrapped with text()
-    edges = db.execute(
-        text("SELECT * FROM issue_graph_edges WHERE issue_slug = :slug ORDER BY event_date ASC"),
-        {"slug": req.issue_slug}
-    ).mappings().all()
-
-    # 3. Groq-Powered Synthesis
-    payload = synthesize_dossier_with_groq(dict(dossier), [dict(e) for e in edges])
-    slides = payload["slides"]
-
-    # 4. Insert Campaign with Nullable article_id
-    campaign = SocialCampaignQueue(
-        article_id=None,
-        article_number=f"DOSSIER: {dossier['chapter_name']}",
-        title=dossier["title"][:250],
-        status="PENDING_APPROVAL",
-        slides_payload=payload,
-        image_paths=[],
-        caption=(
-            f"Evolving Constitutional Dossier: {dossier['title']}\n\n"
-            f"Status: {dossier['status'].upper()} • {len(edges)} Event Nodes Tracked\n\n"
-            f"Explore the live legal evolution and backward linkages on politymentor.com.\n\n"
-            f"#UPSC #GS2 #PolityMentor #{dossier['chapter_name'].replace(' ', '')}"
-        )
-    )
-    db.add(campaign)
-    db.commit()
-    db.refresh(campaign)
-
-    # 5. Render slides and upload to R2
-    cdn_urls = render_dossier_campaign_slides(campaign.id, slides)
-    campaign.image_paths = cdn_urls
-    db.commit()
-    db.refresh(campaign)
-
-    return {
-        "status": "success",
-        "campaign_id": campaign.id,
-        "title": campaign.title,
-        "image_paths": cdn_urls,
-        "slides_payload": payload
-    }
