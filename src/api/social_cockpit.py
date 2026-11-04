@@ -413,16 +413,21 @@ def list_queue(
     
     result = []
     for c in items:
-        slides_list = c.slides_payload.get("slides", []) if isinstance(c.slides_payload, dict) else c.slides_payload
         cdn_images = [ensure_cdn_url(p) for p in (c.image_paths or [])]
         
+        # If it's a Trap campaign, keep the full flat dictionary payload. Otherwise handle slides array.
+        if c.article_number and c.article_number.startswith("TRAP:"):
+            payload_data = c.slides_payload
+        else:
+            payload_data = c.slides_payload.get("slides", []) if isinstance(c.slides_payload, dict) else c.slides_payload
+
         result.append({
             "id": c.id,
             "article_id": c.article_id,
             "article_number": c.article_number,
             "title": c.title,
             "status": c.status,
-            "slides_payload": slides_list,
+            "slides_payload": payload_data,
             "image_paths": cdn_images,
             "caption": c.caption,
             "created_at": c.created_at.isoformat() if c.created_at else datetime.utcnow().isoformat()
