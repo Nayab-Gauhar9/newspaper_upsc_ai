@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
-
+from sqlalchemy import text
 from src.database.session import SessionLocal
 from src.database.models import SocialCampaignQueue
 from src.services.instagram_publisher import InstagramPublisher
@@ -225,3 +225,68 @@ def generate_latest_pib_draft(db: Session = Depends(get_db)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PIB draft generation failed: {str(e)}")
+
+from sqlalchemy import text
+from pydantic import BaseModel
+from src.services.dossier_social_service import (
+    synthesize_dossier_with_groq,
+    render_dossier_campaign_slides
+)
+
+class GenerateDossierRequest(BaseModel):
+    issue_slug: str
+
+@router.post("/generate/dossier")
+def generate_dossier_draft(req: GenerateDossierRequest, db: Session = Depends(get_db)):
+    """Generates an Instagram carousel draft using LLM synthesis directly from an issue dossier and its graph edges."""
+    # 1. Fetch Dossier wrapped with text()
+    dossier = db.execute(
+        text("SELECT * FROM issue_dossiers WHERE issue_slug = :slug LIMIT 1"),
+        {"slug": req.issue_slug}
+    ).mappings().first()
+
+    if not dossier:
+        raise HTTPException(status_code=404, detail="Dossier slug not found.")
+
+    # 2. Fetch Edges wrapped with text()
+    edges = db.execute(
+        text("SELECT * FROM issue_graph_edges WHERE issue_slug = :slug ORDER BY event_date ASC"),
+        {"slug": req.issue_slug}
+    ).mappings().all()
+
+    # 3. Groq-Powered Synthesis
+    payload = synthesize_dossier_with_groq(dict(dossier), [dict(e) for e in edges])
+    slides = payload["slides"]
+
+    # 4. Insert Campaign with Nullable article_id
+    campaign = SocialCampaignQueue(
+        article_id=None,
+        article_number=f"DOSSIER: {dossier['chapter_name']}",
+        title=dossier["title"][:250],
+        status="PENDING_APPROVAL",
+        slides_payload=payload,
+        image_paths=[],
+        caption=(
+            f"Evolving Constitutional Dossier: {dossier['title']}\n\n"
+            f"Status: {dossier['status'].upper()} • {len(edges)} Event Nodes Tracked\n\n"
+            f"Explore the live legal evolution and backward linkages on politymentor.com.\n\n"
+            f"#UPSC #GS2 #PolityMentor #{dossier['chapter_name'].replace(' ', '')}"
+        )
+    )
+    db.add(campaign)
+    db.commit()
+    db.refresh(campaign)
+
+    # 5. Render slides and upload to R2
+    cdn_urls = render_dossier_campaign_slides(campaign.id, slides)
+    campaign.image_paths = cdn_urls
+    db.commit()
+    db.refresh(campaign)
+
+    return {
+        "status": "success",
+        "campaign_id": campaign.id,
+        "title": campaign.title,
+        "image_paths": cdn_urls,
+        "slides_payload": payload
+    }
