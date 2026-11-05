@@ -171,3 +171,49 @@ class NewspaperStorage:
         latest_obj = max(json_objs, key=lambda x: x.last_modified)
         data = self.get_json(latest_obj.object_name)
         return data, latest_obj.object_name
+
+    def list_latest_smart_notes(self, limit: int = 5) -> list:
+        """
+        Lists smart notes sorted by PRID descending, matching the retrieval in MinIOStorage.
+        """
+        import re
+        prefix = "pib/smart_notes/"
+        pattern = re.compile(r"pib/smart_notes/([^/]+)/([^/]+)/smart_notes_(\d+)\.json")
+        matched_keys = []
+
+        try:
+            objects = self.client.list_objects(self.bucket, prefix=prefix, recursive=True)
+            for obj in objects:
+                key = getattr(obj, "object_name", str(obj))
+                match = pattern.search(key)
+                if match:
+                    matched_keys.append({
+                        "prid": int(match.group(3)),
+                        "chapter": match.group(1).strip(),
+                        "topic": match.group(2).strip(),
+                        "key": key
+                    })
+        except Exception as e:
+            print(f"Error listing objects from {self.bucket}: {e}")
+            return []
+
+        matched_keys.sort(key=lambda x: x["prid"], reverse=True)
+
+        latest_notes = []
+        for item in matched_keys[:limit]:
+            try:
+                data = self.get_json(item["key"])
+                latest_notes.append({
+                    "prid": item["prid"],
+                    "chapter": item["chapter"],
+                    "topic": item["topic"],
+                    "headline": data.get("headline", item["topic"]),
+                    "summary": data.get("summary", ""),
+                    "generated_at": data.get("generated_at", ""),
+                    "object_key": item["key"],
+                    "smart_notes": data
+                })
+            except Exception as read_err:
+                print(f"Failed to fetch content for {item['key']}: {read_err}")
+
+        return latest_notes

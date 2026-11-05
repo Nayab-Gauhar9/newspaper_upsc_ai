@@ -468,3 +468,25 @@ def render_trap_campaign_slides(campaign_id: int, payload: dict) -> list[str]:
         urls.append(f"{cdn_base}/{object_key}")
 
     return urls
+
+import json
+from pathlib import Path
+def export_trap_campaign_locally(campaign_id: int, payload: dict, local_export_dir: str):
+    """
+    Non-disruptive local exporter for YouTube Shorts automation.
+    Saves the rendered slides and payload metadata locally without affecting R2/DB pipelines.
+    """
+    out_dir = Path(local_export_dir) / f"trap_camp_{campaign_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Render identical PNGs locally
+    render_trap_slide_1(payload, str(out_dir / "slide_1.png"))
+    render_trap_slide_2(payload, str(out_dir / "slide_2.png"))
+    render_trap_slide_3(payload, str(out_dir / "slide_3.png"))
+    render_trap_slide_4(payload, str(out_dir / "slide_4.png"))
+
+    # 2. Dump the raw engine payload as meta.json
+    with open(out_dir / "meta.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    return out_dir

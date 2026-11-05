@@ -11,20 +11,30 @@ from src.services.pib_social_slide_renderer import (
     render_pib_slide_3,
     render_pib_slide_4,
     render_pib_slide_5,
-    render_pib_slide_6
+    render_pib_slide_6,
 )
+
 
 def clean_unicode_for_pillow(text: str) -> str:
     if not text:
         return ""
     replacements = {
-        "₹": "Rs. ", "\u202f": " ", "\u00a0": " ",
-        "\u2013": "-", "\u2014": "-", "\u2018": "'", "\u2019": "'",
-        "\u201c": '"', "\u201d": '"', "…": "", "\t": " "
+        "₹": "Rs. ",
+        "\u202f": " ",
+        "\u00a0": " ",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "…": "",
+        "\t": " ",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
     return re.sub(r"\s+", " ", text).strip()
+
 
 def sanitize_topic_badge(topic_label: str) -> str:
     clean = topic_label.replace("_", " ").strip()
@@ -33,7 +43,10 @@ def sanitize_topic_badge(topic_label: str) -> str:
     clean = clean.strip().upper()
     return clean[:20] if len(clean) > 20 else clean
 
-def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitutional Milestone") -> dict:
+
+def build_slides_from_pib_note(
+    note_data: dict, topic_label: str = "Constitutional Milestone"
+) -> dict:
     badge_text = sanitize_topic_badge(topic_label)
 
     # 1. Slide 1 (Overview & Thesis)
@@ -46,8 +59,14 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
     first_sentence = summary_raw.split(". ")[0].strip()
     thesis = first_sentence if first_sentence.endswith(".") else f"{first_sentence}."
 
-    raw_linkages = [clean_unicode_for_pillow(x) for x in note_data.get("backward_linkages", [])]
-    chips = [link.split("–")[0].split("-")[0].split(":")[0].strip()[:20] for link in raw_linkages[:3]]
+    raw_linkages = [
+        clean_unicode_for_pillow(x)
+        for x in note_data.get("backward_linkages", [])
+    ]
+    chips = [
+        link.split("–")[0].split("-")[0].split(":")[0].strip()[:20]
+        for link in raw_linkages[:3]
+    ]
 
     slide_1 = {
         "slide_num": "1 / 6",
@@ -55,12 +74,16 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
         "headline": headline,
         "subheadline": subheadline,
         "thesis": thesis,
-        "chips": chips or ["GS-II", "Polity", "Current Affairs"]
+        "chips": chips or ["GS-II", "Polity", "Current Affairs"],
     }
 
     # 2. Slide 2 (Why It Matters for UPSC)
-    why_matters = clean_unicode_for_pillow(note_data.get("why_it_matters", summary_raw))
-    smart_notes = [clean_unicode_for_pillow(x) for x in note_data.get("smart_notes", [])]
+    why_matters = clean_unicode_for_pillow(
+        note_data.get("why_it_matters", summary_raw)
+    )
+    smart_notes = [
+        clean_unicode_for_pillow(x) for x in note_data.get("smart_notes", [])
+    ]
 
     slide_2 = {
         "slide_num": "2 / 6",
@@ -69,9 +92,19 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
         "subheadline": "GS-II Syllabus & Doctrinal Value",
         "analytical_insight": why_matters,
         "points": [
-            {"title": "Core Policy Focus", "desc": smart_notes[0] if smart_notes else summary_raw},
-            {"title": "Administrative Milestone", "desc": smart_notes[1] if len(smart_notes) > 1 else "Establishes key federal policy precedents."}
-        ]
+            {
+                "title": "Core Policy Focus",
+                "desc": smart_notes[0] if smart_notes else summary_raw,
+            },
+            {
+                "title": "Administrative Milestone",
+                "desc": (
+                    smart_notes[1]
+                    if len(smart_notes) > 1
+                    else "Establishes key federal policy precedents."
+                ),
+            },
+        ],
     }
 
     # 3. Slide 3 (Smart Notes Dossier)
@@ -88,7 +121,7 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
 
         formatted_notes.append({
             "title": parts[0].strip()[:32],
-            "desc": parts[1].strip() if len(parts) > 1 else parts[0].strip()
+            "desc": parts[1].strip() if len(parts) > 1 else parts[0].strip(),
         })
 
     slide_3 = {
@@ -96,7 +129,7 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
         "tier_badge": "SMART NOTES DOSSIER",
         "headline": "Key Facts, Data & Directives",
         "subheadline": "Targeted UPSC Current Affairs Deconstruction",
-        "notes": formatted_notes
+        "notes": formatted_notes,
     }
 
     # 4. Slide 4 (Backward Linkages - All Items)
@@ -113,7 +146,7 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
 
         linkage_tiles.append({
             "title": parts[0].strip(),
-            "desc": parts[1].strip() if len(parts) > 1 else ""
+            "desc": parts[1].strip() if len(parts) > 1 else "",
         })
 
     slide_4 = {
@@ -121,7 +154,7 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
         "tier_badge": "BACKWARD LINKAGES",
         "headline": "Constitutional & Statutory Anchors",
         "subheadline": "Relevant Articles, Doctrines & Precedents",
-        "points": linkage_tiles
+        "points": linkage_tiles,
     }
 
     # 5. Slide 5 (Prelims Drill & Mains Question)
@@ -133,12 +166,16 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
         is_corr = pt.get("is_correct", False)
 
         rule_text = expl if expl else stmt
-        trap_text = "Assuming this provision is discretionary or subject to executive dilution." if is_corr else stmt
+        trap_text = (
+            "Assuming this provision is discretionary or subject to executive dilution."
+            if is_corr
+            else stmt
+        )
 
         rows.append({
             "param": f"Prelims Fact #{idx}",
             "rule": rule_text if rule_text.endswith(".") else f"{rule_text}.",
-            "trap": trap_text if trap_text.endswith(".") else f"{trap_text}."
+            "trap": trap_text if trap_text.endswith(".") else f"{trap_text}.",
         })
 
     mains_q = clean_unicode_for_pillow(note_data.get("mains_question", ""))
@@ -148,7 +185,7 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
         "tier_badge": "PRELIMS DRILL & MAINS QUESTION",
         "headline": "Exam Crucible & Application",
         "rows": rows,
-        "mains_question": mains_q
+        "mains_question": mains_q,
     }
 
     # 6. Slide 6 (CTA Card)
@@ -159,10 +196,11 @@ def build_slides_from_pib_note(note_data: dict, topic_label: str = "Constitution
         "subheadline": "Your GS-II Constitutional Intelligence Terminal",
         "website": "politymentor.com",
         "telegram": "t.me/polity_mentor_ai",
-        "instagram": "@politymentor_ai"
+        "instagram": "@politymentor_ai",
     }
 
     return {"slides": [slide_1, slide_2, slide_3, slide_4, slide_5, slide_6]}
+
 
 def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
     scratch_dir = os.path.join(tempfile.gettempdir(), f"pib_camp_{campaign_id}")
@@ -176,11 +214,13 @@ def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
         render_pib_slide_3,
         render_pib_slide_4,
         render_pib_slide_5,
-        render_pib_slide_6
+        render_pib_slide_6,
     ]
 
     # Active Cloudflare R2 Public CDN Domain
-    cdn_base = os.getenv("R2_PUBLIC_DOMAIN", "https://media.politymentor.com").rstrip("/")
+    cdn_base = os.getenv(
+        "R2_PUBLIC_DOMAIN", "https://media.politymentor.com"
+    ).rstrip("/")
 
     for idx, (slide, render_fn) in enumerate(zip(slides, renderers), start=1):
         filename = f"slide_{idx}.png"
@@ -189,12 +229,16 @@ def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
         render_fn(slide, local_png_path)
 
         object_key = f"campaigns/pib/camp_{campaign_id}/{filename}"
-        
+
         # Upload directly to R2 bucket
         if hasattr(storage, "upload_file"):
-            storage.upload_file(local_file_path=local_png_path, object_name=object_key)
+            storage.upload_file(
+                local_file_path=local_png_path, object_name=object_key
+            )
         else:
-            storage.upload_and_get_presigned_url(local_file_path=local_png_path, object_name=object_key)
+            storage.upload_and_get_presigned_url(
+                local_file_path=local_png_path, object_name=object_key
+            )
 
         # Permanent, unexpired public CDN link
         public_cdn_url = f"{cdn_base}/{object_key}"
@@ -202,28 +246,78 @@ def render_pib_campaign_slides(campaign_id: int, slides: list) -> list[str]:
 
     return urls
 
-def generate_campaign_for_latest_pib(db: Session) -> SocialCampaignQueue:
+
+def fetch_actual_latest_pib_note() -> tuple[dict, str]:
+    """
+    Directly resolves the latest PIB note from NewspaperStorage using both
+    list_latest_smart_notes (PRID-sorted) and get_latest_pib_smart_note (timestamp-sorted).
+    """
     storage = NewspaperStorage(force_r2=True)
-    note_data, object_key = storage.get_latest_pib_smart_note()
 
-    parts = object_key.split("/")
-    topic_label = parts[2].replace("_", " ") if len(parts) > 2 else "Current Affairs"
+    # 1. Primary: Use PRID sorting if implemented on NewspaperStorage
+    if hasattr(storage, "list_latest_smart_notes"):
+        try:
+            notes = storage.list_latest_smart_notes(limit=1)
+            if notes and isinstance(notes, list):
+                note = notes[0]
+                obj_key = (
+                    note.get("object_key")
+                    or note.get("minio_key")
+                    or note.get("key", "")
+                )
+                note_payload = note.get("smart_notes", note)
+                return note_payload, obj_key
+        except Exception:
+            pass
 
+    # 2. Robust fallback: Use S3 LastModified timestamp scanning
+    if hasattr(storage, "get_latest_pib_smart_note"):
+        return storage.get_latest_pib_smart_note()
+
+    raise FileNotFoundError(
+        "Unable to retrieve the latest PIB smart note from NewspaperStorage."
+    )
+
+
+def generate_campaign_for_latest_pib(db: Session) -> SocialCampaignQueue:
+    # 1. Fetch exact latest note data and R2 object key
+    note_data, object_key = fetch_actual_latest_pib_note()
+
+    # 2. Dynamically extract topic label from folder hierarchy
+    # e.g.: pib/smart_notes/<Chapter>/<Topic>/smart_notes_<PRID>.json
+    parts = object_key.split("/") if object_key else []
+    if len(parts) >= 4:
+        topic_label = parts[-2].replace("_", " ")
+    elif len(parts) > 2:
+        topic_label = parts[2].replace("_", " ")
+    else:
+        topic_label = "Current Affairs"
+
+    # 3. Build the 6-slide structure
     payload = build_slides_from_pib_note(note_data, topic_label)
     slides = payload.get("slides", [])
 
     headline = note_data.get("headline", "PIB Constitutional Dossier")
-    raw_linkages = [clean_unicode_for_pillow(x) for x in note_data.get("backward_linkages", [])]
-    top_linkages = [b.split("–")[0].split("-")[0].split(":")[0].strip() for b in raw_linkages[:3]]
+    raw_linkages = [
+        clean_unicode_for_pillow(x)
+        for x in note_data.get("backward_linkages", [])
+    ]
+    top_linkages = [
+        b.split("–")[0].split("-")[0].split(":")[0].strip()
+        for b in raw_linkages[:3]
+    ]
 
+    # 4. Resolve relational constitutional article link for the database queue
     resolved_article = None
     for link in raw_linkages:
         match = re.search(r"Article\s+(\d+[A-Za-z]*)", link, re.IGNORECASE)
         if match:
             art_str = f"Article {match.group(1)}"
-            resolved_article = db.query(ConstitutionalArticleModel).filter(
-                ConstitutionalArticleModel.article_number.ilike(art_str)
-            ).first()
+            resolved_article = (
+                db.query(ConstitutionalArticleModel)
+                .filter(ConstitutionalArticleModel.article_number.ilike(art_str))
+                .first()
+            )
             if resolved_article:
                 break
 
@@ -232,6 +326,7 @@ def generate_campaign_for_latest_pib(db: Session) -> SocialCampaignQueue:
 
     article_id = resolved_article.id if resolved_article else 1
 
+    # 5. Persist to social campaign queue
     campaign = SocialCampaignQueue(
         article_id=article_id,
         article_number=f"PIB: {sanitize_topic_badge(topic_label)}",
@@ -244,12 +339,13 @@ def generate_campaign_for_latest_pib(db: Session) -> SocialCampaignQueue:
             f"Key Anchors: {', '.join(top_linkages)}\n\n"
             f"Read the complete smart note dossier on politymentor.com.\n\n"
             f"#UPSC #IndianPolity #GS2 #PIB #CurrentAffairs"
-        )
+        ),
     )
     db.add(campaign)
     db.commit()
     db.refresh(campaign)
 
+    # 6. Render slides to Cloudflare R2 and attach permanent CDN links
     image_urls = render_pib_campaign_slides(campaign.id, slides)
     campaign.image_paths = image_urls
     db.commit()
