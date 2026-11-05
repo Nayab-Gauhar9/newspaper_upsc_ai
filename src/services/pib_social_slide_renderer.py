@@ -1,14 +1,16 @@
 import os
+import re
 import textwrap
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
-COLOR_BG = (15, 23, 42, 255)          # Slate #0F172A outer
-COLOR_CARD = (0, 0, 0, 255)           # Pure Black inner
+COLOR_BG = (15, 23, 42, 255)          # Slate #0F172A outer container
+COLOR_CARD = (0, 0, 0, 255)           # Pure Black inner card
 COLOR_CARD_BORDER = (51, 65, 85, 255) # Slate Border (#334155)
-COLOR_GOLD = (168, 153, 123)          # Antique Gold
-COLOR_ROSE = (185, 159, 159)          # Muted Rose
-COLOR_CYAN = (56, 189, 248)           # Sky Blue
-COLOR_AMBER = (245, 158, 11)          # Warning Amber
+COLOR_GOLD = (168, 153, 123)          # Antique Gold (#A8997B)
+COLOR_ROSE = (185, 159, 159)          # Muted Rose (#B99F9F)
+COLOR_CYAN = (56, 189, 248)           # Sky Blue (#38BDF8)
+COLOR_AMBER = (245, 158, 11)          # Warning Amber (#F59E0B)
 COLOR_TEXT_WHITE = (248, 250, 252)
 COLOR_TEXT_BODY = (203, 213, 225)
 COLOR_TEXT_MUTED = (148, 163, 184)
@@ -150,17 +152,43 @@ def draw_multiline_headline(
 
 
 def get_logo_image(size: int = 44):
-    candidates = [
-        "static/logo.png",
-        "public/logo.png",
-        "logo.png",
-        "static/logo.png.png",
-        "public/logo.png.png",
+    """
+    Exhaustively scans all potential backend paths, working directories,
+    and parent roots to reliably locate static/logo.png.
+    """
+    # 1. First attempt importing verified working function if present
+    try:
+        from src.services.social_slide_renderer import get_logo_image as base_get_logo
+        logo = base_get_logo(size=size)
+        if logo:
+            return logo
+    except Exception:
+        pass
+
+    script_path = Path(__file__).resolve()
+    backend_root = script_path.parent.parent.parent  # Resolves src/services/... -> root
+    cwd = Path.cwd()
+
+    candidate_paths = [
+        os.getenv("POLITY_LOGO_PATH", ""),
+        backend_root / "static" / "logo.png",
+        backend_root / "public" / "logo.png",
+        backend_root / "logo.png",
+        cwd / "static" / "logo.png",
+        cwd / "public" / "logo.png",
+        cwd / "logo.png",
+        cwd.parent / "static" / "logo.png",
+        Path("C:/Project/newspaper_upsc_ai/static/logo.png"),
+        Path("C:/Project/Youtube/static/logo.png"),
+        Path("static/logo.png"),
+        Path("public/logo.png"),
+        Path("logo.png")
     ]
-    for p in candidates:
-        if os.path.exists(p):
+
+    for p in candidate_paths:
+        if p and os.path.exists(str(p)):
             try:
-                logo = Image.open(p).convert("RGBA")
+                logo = Image.open(str(p)).convert("RGBA")
                 logo = logo.resize((size, size), Image.Resampling.LANCZOS)
                 mask = Image.new("L", (size, size), 0)
                 mask_draw = ImageDraw.Draw(mask)
@@ -194,11 +222,8 @@ def create_base_canvas(slide_num: str, tier_badge: str):
         draw.ellipse([94, 82, 142, 130], outline=COLOR_GOLD, width=1)
         text_x = 152
     else:
-        draw.ellipse(
-            [96, 84, 138, 126], fill=(28, 38, 64), outline=COLOR_GOLD, width=2
-        )
-        draw.line([(117, 92), (117, 118)], fill=COLOR_GOLD, width=2)
-        draw.line([(106, 100), (128, 100)], fill=COLOR_GOLD, width=2)
+        # Clean brand disc without fallback plus/cross lines
+        draw.ellipse([96, 84, 138, 126], fill=(28, 38, 64), outline=COLOR_GOLD, width=2)
         text_x = 152
 
     draw.text(
@@ -256,28 +281,33 @@ def render_pib_slide_1(slide: dict, output_path: str):
         (96, 275), clean_text(slide["headline"]), font=font_hero, fill=COLOR_GOLD
     )
 
-    font_sub = resolve_font("bold", 26)
-    draw.text(
-        (96, 375),
-        clean_text(slide.get("subheadline", "")),
-        font=font_sub,
-        fill=COLOR_ROSE,
-    )
+    subhead_raw = clean_text(slide.get("subheadline", ""))
+    font_size_sub = 22 if len(subhead_raw) > 52 else 25
+    font_sub = resolve_font("bold", font_size_sub)
+    subhead_lines = textwrap.wrap(subhead_raw, width=48)
+
+    sub_y = 370
+    for s_line in subhead_lines[:2]:
+        # Strip trailing bullet or punctuation at edge of wrapped lines
+        cleaned_line = s_line.rstrip(" •–-").strip()
+        draw.text((96, sub_y), cleaned_line, font=font_sub, fill=COLOR_ROSE)
+        sub_y += 32
 
     font_body = resolve_font("regular", 24)
     thesis_clean = clean_text(slide.get("thesis", ""))
     lines = textwrap.wrap(thesis_clean, width=48)
-    y_pos = 450
+    y_pos = sub_y + 35
     for line in lines:
         draw.text((96, y_pos), line, font=font_body, fill=COLOR_TEXT_BODY)
         y_pos += 38
 
     chip_y = max(y_pos + 40, 780)
-    font_chip = resolve_font("bold", 20)
+    font_chip = resolve_font("bold", 18)
     for chip in slide.get("chips", []):
-        chip_clean = clean_text(chip)
+        chip_clean = clean_text(chip).strip("'\"").strip()
+        pill_w = max(420, min(840, int(draw.textlength(chip_clean, font=font_chip)) + 68))
         draw.rounded_rectangle(
-            [96, chip_y, 96 + 540, chip_y + 52],
+            [96, chip_y, 96 + pill_w, chip_y + 52],
             radius=18,
             fill=COLOR_CARD_TRANSLUCENT,
             outline=COLOR_CARD_BORDER,
@@ -338,7 +368,7 @@ def render_pib_slide_2(slide: dict, output_path: str):
 
     y_cursor += box1_h + 24
     for item in slide.get("points", [])[:2]:
-        title = clean_text(item.get("title", ""))
+        title = clean_text(item.get("title", "")).strip("'\"").strip()
         desc = clean_text(item.get("desc", ""))
         lines_p = textwrap.wrap(desc, width=54)
         box2_h = 44 + (len(lines_p) * 28) + 14
@@ -396,7 +426,7 @@ def render_pib_slide_3(slide: dict, output_path: str):
     font_body = resolve_font("regular", 19)
 
     for idx, item in enumerate(notes[:4], 1):
-        title = clean_text(item.get("title", f"Takeaway #{idx}"))
+        title = clean_text(item.get("title", f"Takeaway #{idx}")).strip("'\"").strip()
         text = clean_text(item.get("desc", ""))
 
         lines = textwrap.wrap(text, width=54)
@@ -454,7 +484,7 @@ def render_pib_slide_4(slide: dict, output_path: str):
     if total_items <= 5:
         y_card = next_y + 42
         for item in points:
-            title = clean_text(item.get("title", ""))
+            title = clean_text(item.get("title", "")).strip("'\"").strip()
             desc = clean_text(item.get("desc", ""))
             lines = textwrap.wrap(desc, width=54) if desc else []
             box_h = 52 + (len(lines) * 26)
@@ -498,7 +528,7 @@ def render_pib_slide_4(slide: dict, output_path: str):
             115, int((available_height - (num_rows * row_gap)) / num_rows)
         )
 
-        font_tile_title = resolve_font("bold", 17)
+        font_tile_title = resolve_font("bold", 16)
         font_tile_desc = resolve_font("regular", 15)
 
         for idx, item in enumerate(points[:12]):
@@ -508,7 +538,7 @@ def render_pib_slide_4(slide: dict, output_path: str):
             x_pos = left_x if col == 0 else right_x
             y_pos = start_y + (row * (box_h + row_gap))
 
-            title = clean_text(item.get("title", ""))
+            title = clean_text(item.get("title", "")).strip("'\"").strip()
             desc = clean_text(item.get("desc", ""))
 
             draw.rounded_rectangle(
@@ -524,9 +554,10 @@ def render_pib_slide_4(slide: dict, output_path: str):
                 fill=COLOR_GOLD,
             )
 
+            title_lines = textwrap.wrap(title, width=32)
             draw.text(
-                (x_pos + 32, y_pos + 11),
-                title[:30],
+                (x_pos + 32, y_pos + 10),
+                title_lines[0],
                 font=font_tile_title,
                 fill=COLOR_TEXT_WHITE,
             )

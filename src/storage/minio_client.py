@@ -217,3 +217,5 @@ class NewspaperStorage:
                 print(f"Failed to fetch content for {item['key']}: {read_err}")
 
         return latest_notes
+
+    
