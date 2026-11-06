@@ -1,5 +1,6 @@
 import os
 import re
+import textwrap
 import tempfile
 from sqlalchemy.orm import Session
 
@@ -28,7 +29,7 @@ def clean_unicode_for_pillow(text: str) -> str:
         "\u2019": "'",
         "\u201c": '"',
         "\u201d": '"',
-        "…": "",
+        "…": "...",
         "\t": " ",
     }
     for old, new in replacements.items():
@@ -45,19 +46,40 @@ def sanitize_topic_badge(topic_label: str) -> str:
 
 
 def clean_linkage_title(raw_link: str) -> tuple[str, str]:
-    """Strips M. Laxmikanth boilerplate and stray quotes, cleanly separating title & desc."""
+    """Purely dynamic cleaner: strips list bullets, textbook prefixes, and splits on delimiters."""
     text = clean_unicode_for_pillow(raw_link)
     text = re.sub(r"(?i)^m\.?\s*laxmi[a-z]*\s*(chapter:?)?\s*", "", text).strip()
     text = re.sub(r"(?i)^laxmi[a-z]*\s*(chapter:?)?\s*", "", text).strip()
+    
+    # Strip leading numerals, dashes, and bullets ('5 - ', '1. ', '• ')
+    text = re.sub(r"^[\d\.\-\)\s•\*]+", "", text).strip()
     text = text.strip(":'\"- ").strip()
 
+    title, desc = "", ""
     for sep in ["–", "—", ":", " - "]:
         if sep in text:
             parts = text.split(sep, 1)
-            t = parts[0].strip(" '\"")
-            d = parts[1].strip(" '\"")
-            return t, d
-    return text.strip(" '\""), ""
+            title = parts[0].strip(" '\"")
+            desc = parts[1].strip(" '\"")
+            break
+
+    if not title:
+        title = text.strip(" '\"")
+
+    # Balance unclosed parenthesis if split across delimiter
+    if "(" in title and ")" not in title:
+        if desc and ")" in desc:
+            title = f"{title} ({desc.split(')')[0]})"
+            desc = desc.split(")", 1)[1].strip(" :–-")
+        else:
+            title = title.replace("(", "").strip()
+
+    if title.endswith(")") and "(" not in title:
+        title = title[:-1].strip()
+    if desc.endswith(")") and "(" not in desc:
+        desc = desc[:-1].strip()
+
+    return title, desc
 
 
 def build_slides_from_pib_note(
@@ -65,91 +87,85 @@ def build_slides_from_pib_note(
 ) -> dict:
     badge_text = sanitize_topic_badge(topic_label)
 
-    # 1. Slide 1 (Overview & Thesis)
+    # -------------------------------------------------------------------------
+    # 1. Slide 1 (Title, Short Core Hook & Anchor Pills)
+    # -------------------------------------------------------------------------
     headline = "PIB DAILY DIGEST"
     raw_head = clean_unicode_for_pillow(note_data.get("headline", topic_label))
     first_phrase = raw_head.split("–")[0].split(":")[0].split(" - ")[0].strip(" '\"")
-    
-    # Clean subheadline without dangling bullets
     subheadline = f"{first_phrase.upper()} • CONSTITUTIONAL LINKAGE"
 
     summary_raw = clean_unicode_for_pillow(note_data.get("summary", ""))
+    
+    # Keep Slide 1 hook concise: first sentence only
     first_sentence = summary_raw.split(". ")[0].strip()
-    thesis = first_sentence if first_sentence.endswith(".") else f"{first_sentence}."
+    core_hook = first_sentence if first_sentence.endswith(".") else f"{first_sentence}."
 
     raw_linkages = [
         clean_unicode_for_pillow(x)
         for x in note_data.get("backward_linkages", [])
     ]
     filtered_linkages = []
-    chips = []
+    structured_chips = []
 
     for link in raw_linkages:
         title, desc = clean_linkage_title(link)
         if not title:
             continue
         filtered_linkages.append({"title": title, "desc": desc})
-        clean_chip_name = title.split("(")[0].strip(" '\"")
-        if clean_chip_name and clean_chip_name not in chips:
-            chips.append(clean_chip_name)
-
-    if not chips:
-        chips = ["GS-II", "Polity", "Current Affairs"]
+        
+        if len(structured_chips) < 3:
+            structured_chips.append({
+                "article": title,
+                "tagline": desc if desc else "Constitutional & Statutory Anchor"
+            })
 
     slide_1 = {
         "slide_num": "1 / 6",
         "tier_badge": f"PIB INTELLIGENCE • {badge_text}",
         "headline": headline,
         "subheadline": subheadline,
-        "thesis": thesis,
-        "chips": chips[:3],
+        "core_hook": core_hook,
+        "chips": structured_chips,
     }
 
-    # 2. Slide 2 (Why It Matters for UPSC)
-    why_matters = clean_unicode_for_pillow(
-        note_data.get("why_it_matters", summary_raw)
-    )
-    smart_notes = [
-        clean_unicode_for_pillow(x) for x in note_data.get("smart_notes", [])
-    ]
+    # -------------------------------------------------------------------------
+    # 2. Slide 2 (Full Summary & Strategic UPSC Value Analysis)
+    # -------------------------------------------------------------------------
+    why_matters = clean_unicode_for_pillow(note_data.get("why_it_matters", ""))
 
     slide_2 = {
         "slide_num": "2 / 6",
         "tier_badge": "WHY IT MATTERS FOR UPSC",
         "headline": "Strategic Governance & Institutional Analysis",
         "subheadline": "GS-II Syllabus & Doctrinal Value",
+        "full_summary": summary_raw,
         "analytical_insight": why_matters,
-        "points": [
-            {
-                "title": "Core Policy Focus",
-                "desc": smart_notes[0] if smart_notes else summary_raw,
-            },
-            {
-                "title": "Administrative Milestone",
-                "desc": (
-                    smart_notes[1]
-                    if len(smart_notes) > 1
-                    else "Establishes key federal policy precedents."
-                ),
-            },
-        ],
     }
 
+    # -------------------------------------------------------------------------
     # 3. Slide 3 (Smart Notes Dossier)
+    # -------------------------------------------------------------------------
+    smart_notes = [
+        clean_unicode_for_pillow(x) for x in note_data.get("smart_notes", [])
+    ]
     formatted_notes = []
     for idx, item in enumerate(smart_notes[:4], 1):
-        if "–" in item:
-            parts = item.split("–", 1)
-        elif ":" in item:
-            parts = item.split(":", 1)
-        elif "-" in item:
-            parts = item.split("-", 1)
-        else:
-            parts = [f"Directive #{idx}", item]
+        title_part = ""
+        desc_part = item
+        for sep in ["–", "—", ":", " - "]:
+            if sep in item:
+                parts = item.split(sep, 1)
+                title_part = parts[0].strip(" '\"")
+                desc_part = parts[1].strip(" '\"")
+                break
+        
+        if not title_part:
+            title_part = f"Directive #{idx}"
 
         formatted_notes.append({
-            "title": parts[0].strip()[:32].strip(" '\""),
-            "desc": parts[1].strip() if len(parts) > 1 else parts[0].strip(),
+            "title": title_part,
+            "desc": desc_part,
         })
 
     slide_3 = {
@@ -160,29 +176,35 @@ def build_slides_from_pib_note(
         "notes": formatted_notes,
     }
 
-    # 4. Slide 4 (Backward Linkages)
+    # -------------------------------------------------------------------------
+    # 4. Slide 4 (100% Dynamic Backward Linkages)
+    # -------------------------------------------------------------------------
     slide_4 = {
         "slide_num": "4 / 6",
         "tier_badge": "BACKWARD LINKAGES",
         "headline": "Constitutional & Statutory Anchors",
         "subheadline": "Relevant Articles, Doctrines & Precedents",
-        "points": filtered_linkages,
+        "points": filtered_linkages[:10],
     }
 
-    # 5. Slide 5 (Prelims Drill & Mains Question)
+    # -------------------------------------------------------------------------
+    # 5. Slide 5 (100% Dynamic Prelims Traps & Mains Question)
+    # -------------------------------------------------------------------------
     practice_points = note_data.get("prelims_practice_points", [])
     rows = []
+    
     for idx, pt in enumerate(practice_points[:2], 1):
         stmt = clean_unicode_for_pillow(pt.get("statement", ""))
         expl = clean_unicode_for_pillow(pt.get("explanation", ""))
-        is_corr = pt.get("is_correct", False)
+        trap_val = clean_unicode_for_pillow(pt.get("trap", ""))
 
         rule_text = expl if expl else stmt
-        trap_text = (
-            "Assuming this provision is discretionary or subject to executive dilution."
-            if is_corr
-            else stmt
-        )
+        if trap_val:
+            trap_text = trap_val
+        elif pt.get("is_correct") is False:
+            trap_text = stmt
+        else:
+            trap_text = f"Assuming provision is absolute or without statutory limitations: {stmt}"
 
         rows.append({
             "param": f"Prelims Fact #{idx}",
@@ -200,7 +222,9 @@ def build_slides_from_pib_note(
         "mains_question": mains_q,
     }
 
-    # 6. Slide 6 (CTA Card)
+    # -------------------------------------------------------------------------
+    # 6. Slide 6 (Platform Call-To-Action)
+    # -------------------------------------------------------------------------
     slide_6 = {
         "slide_num": "6 / 6",
         "tier_badge": "JOIN THE ECOSYSTEM",
