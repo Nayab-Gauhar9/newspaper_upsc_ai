@@ -46,12 +46,10 @@ def sanitize_topic_badge(topic_label: str) -> str:
 
 
 def clean_linkage_title(raw_link: str) -> tuple[str, str]:
-    """Purely dynamic cleaner: strips list bullets, textbook prefixes, and splits on delimiters."""
+    """Purely dynamic cleaner: splits titles and extracts parentheticals into descriptions."""
     text = clean_unicode_for_pillow(raw_link)
     text = re.sub(r"(?i)^m\.?\s*laxmi[a-z]*\s*(chapter:?)?\s*", "", text).strip()
     text = re.sub(r"(?i)^laxmi[a-z]*\s*(chapter:?)?\s*", "", text).strip()
-    
-    # Strip leading numerals, dashes, and bullets ('5 - ', '1. ', '• ')
     text = re.sub(r"^[\d\.\-\)\s•\*]+", "", text).strip()
     text = text.strip(":'\"- ").strip()
 
@@ -66,14 +64,15 @@ def clean_linkage_title(raw_link: str) -> tuple[str, str]:
     if not title:
         title = text.strip(" '\"")
 
-    # Balance unclosed parenthesis if split across delimiter
-    if "(" in title and ")" not in title:
-        if desc and ")" in desc:
-            title = f"{title} ({desc.split(')')[0]})"
-            desc = desc.split(")", 1)[1].strip(" :–-")
-        else:
-            title = title.replace("(", "").strip()
+    # If desc is empty but title ends with parenthetical info, extract it into desc
+    if not desc and "(" in title and title.endswith(")"):
+        m = re.match(r"^(.*?)\s*\((.*?)\)$", title)
+        if m:
+            title = m.group(1).strip()
+            desc = m.group(2).strip()
 
+    if "(" in title and ")" not in title:
+        title = title.replace("(", "").strip()
     if title.endswith(")") and "(" not in title:
         title = title[:-1].strip()
     if desc.endswith(")") and "(" not in desc:
@@ -88,7 +87,7 @@ def build_slides_from_pib_note(
     badge_text = sanitize_topic_badge(topic_label)
 
     # -------------------------------------------------------------------------
-    # 1. Slide 1 (Title, Short Core Hook & Anchor Pills)
+    # 1. Slide 1 (Title, Short Core Hook & Anchor Capsules)
     # -------------------------------------------------------------------------
     headline = "PIB DAILY DIGEST"
     raw_head = clean_unicode_for_pillow(note_data.get("headline", topic_label))
@@ -96,10 +95,17 @@ def build_slides_from_pib_note(
     subheadline = f"{first_phrase.upper()} • CONSTITUTIONAL LINKAGE"
 
     summary_raw = clean_unicode_for_pillow(note_data.get("summary", ""))
+
+    # Robust sentence extraction: avoids splitting on month abbreviations (Jan., Oct., Nov.)
+    clean_summary_for_split = re.sub(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*", r"\1 ", summary_raw)
+    sentences = re.split(r"(?<=[a-zA-Z0-9\)])[.!?]\s+", clean_summary_for_split)
     
-    # Keep Slide 1 hook concise: first sentence only
-    first_sentence = summary_raw.split(". ")[0].strip()
-    core_hook = first_sentence if first_sentence.endswith(".") else f"{first_sentence}."
+    if sentences:
+        core_hook = sentences[0].strip()
+        if not core_hook.endswith((".", "!", "?")):
+            core_hook += "."
+    else:
+        core_hook = textwrap.shorten(summary_raw, width=180, placeholder="...")
 
     raw_linkages = [
         clean_unicode_for_pillow(x)
@@ -125,6 +131,7 @@ def build_slides_from_pib_note(
         "tier_badge": f"PIB INTELLIGENCE • {badge_text}",
         "headline": headline,
         "subheadline": subheadline,
+        "thesis": core_hook,
         "core_hook": core_hook,
         "chips": structured_chips,
     }
@@ -141,6 +148,7 @@ def build_slides_from_pib_note(
         "subheadline": "GS-II Syllabus & Doctrinal Value",
         "full_summary": summary_raw,
         "analytical_insight": why_matters,
+        "points": [],
     }
 
     # -------------------------------------------------------------------------

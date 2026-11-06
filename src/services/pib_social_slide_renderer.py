@@ -319,17 +319,17 @@ def render_pib_slide_1(slide: dict, output_path: str):
         draw.text((96, sub_y), cleaned_line, font=font_sub, fill=COLOR_CYAN)
         sub_y += 34
 
-    # Render a clean, punchy core hook (1 to 2 lines max)
-    font_body = resolve_font("regular", 24)
-    hook_clean = clean_text(slide.get("core_hook", ""))
-    lines = textwrap.wrap(hook_clean, width=48)
-    y_pos = sub_y + 36
-    for line in lines[:3]:
+    # Robust thesis / core hook rendering
+    font_body = resolve_font("regular", 22)
+    hook_clean = clean_text(slide.get("core_hook", slide.get("thesis", "")))
+    lines = textwrap.wrap(hook_clean, width=50)
+    y_pos = sub_y + 32
+    for line in lines:
         draw.text((96, y_pos), line, font=font_body, fill=COLOR_TEXT_BODY)
-        y_pos += 38
+        y_pos += 34
 
-    chip_y = max(y_pos + 50, 680)
-    font_chip_title = resolve_font("bold", 20)
+    chip_y = max(y_pos + 46, 730)
+    font_chip_title = resolve_font("bold", 19)
     font_chip_sub = resolve_font("medium", 16)
 
     chips = slide.get("chips", [])[:3]
@@ -350,7 +350,7 @@ def render_pib_slide_1(slide: dict, output_path: str):
 
         c_title = textwrap.shorten(c_title, width=54, placeholder="...")
 
-        pill_h = 74 if c_desc else 56
+        pill_h = 72 if c_desc else 54
         half_h = int(pill_h // 2)
 
         draw.rounded_rectangle(
@@ -366,7 +366,7 @@ def render_pib_slide_1(slide: dict, output_path: str):
         )
 
         draw.text(
-            (144, chip_y + (12 if c_desc else 16)),
+            (144, chip_y + (10 if c_desc else 15)),
             c_title,
             font=font_chip_title,
             fill=COLOR_CYAN,
@@ -374,7 +374,7 @@ def render_pib_slide_1(slide: dict, output_path: str):
         if c_desc:
             desc_clipped = textwrap.shorten(c_desc, width=68, placeholder="...")
             draw.text(
-                (144, chip_y + 40),
+                (144, chip_y + 38),
                 desc_clipped,
                 font=font_chip_sub,
                 fill=COLOR_TEXT_BODY,
@@ -406,12 +406,11 @@ def render_pib_slide_2(slide: dict, output_path: str):
     )
     y_cursor = next_y + 32
 
-    # Shared equal font parameters across both containers
     font_body_shared = resolve_font("medium", 21)
     line_h = 32
 
-    # 1. Full Executive Summary Container (renders all lines without clipping)
-    summary_text = clean_text(slide.get("full_summary", ""))
+    # 1. Full Executive Summary Container
+    summary_text = clean_text(slide.get("full_summary", slide.get("summary", "")))
     if summary_text:
         lines_sum = textwrap.wrap(summary_text, width=50)
         sum_h = int(52 + (len(lines_sum) * line_h) + 16)
@@ -438,7 +437,7 @@ def render_pib_slide_2(slide: dict, output_path: str):
 
         y_cursor += int(sum_h + 20)
 
-    # 2. Strategic UPSC Value Hero Container (equal 21px font)
+    # 2. Strategic UPSC Value Hero Container
     narrative = clean_text(slide.get("analytical_insight", ""))
     if not narrative:
         narrative = "Examines structural institutional implications and governance impacts for GS-II."
@@ -483,6 +482,7 @@ def render_pib_slide_2(slide: dict, output_path: str):
         y_line += line_h
 
     img.save(output_path, "PNG")
+
 
 # ---------------------------------------------------------------------------
 # PIB SLIDE 3: SMART NOTES (DYNAMIC BALANCED BOXES)
@@ -548,7 +548,7 @@ def render_pib_slide_3(slide: dict, output_path: str):
 
 
 # ---------------------------------------------------------------------------
-# PIB SLIDE 4: ALL BACKWARD LINKAGES (ADAPTIVE, ZERO HARDCODING)
+# PIB SLIDE 4: ALL BACKWARD LINKAGES (NO WORD LIMIT TRUNCATIONS)
 # ---------------------------------------------------------------------------
 def render_pib_slide_4(slide: dict, output_path: str):
     img, draw, W, H = create_base_canvas(slide["slide_num"], slide["tier_badge"])
@@ -575,8 +575,8 @@ def render_pib_slide_4(slide: dict, output_path: str):
         for item in points:
             title = clean_text(item.get("title", "")).strip("'\"").strip()
             desc = clean_text(item.get("desc", ""))
-            lines = textwrap.wrap(desc, width=56) if desc else []
-            box_h = int(50 + (len(lines[:3]) * 24))
+            lines = textwrap.wrap(desc, width=54) if desc else []
+            box_h = int(52 + (len(lines[:3]) * 25))
 
             draw.rounded_rectangle(
                 [96, y_card, W - 96, y_card + box_h],
@@ -608,17 +608,17 @@ def render_pib_slide_4(slide: dict, output_path: str):
         col_w = 428
         left_x = 96
         right_x = W - 96 - col_w
-        start_y = next_y + 30
+        start_y = next_y + 24
 
         num_rows = (total_items + 1) // 2
-        available_height = (H - 140) - start_y
-        row_gap = 12
+        available_height = (H - 135) - start_y
+        row_gap = 10
         box_h = int(min(
-            135, max(100, (available_height - (num_rows * row_gap)) // num_rows)
+            145, max(112, (available_height - (num_rows * row_gap)) // num_rows)
         ))
 
-        font_tile_title = resolve_font("bold", 16)
-        font_tile_desc = resolve_font("regular", 14)
+        font_tile_title = resolve_font("bold", 15)
+        font_tile_desc = resolve_font("regular", 13)
 
         for idx, item in enumerate(points):
             col = idx % 2
@@ -639,35 +639,47 @@ def render_pib_slide_4(slide: dict, output_path: str):
             )
 
             draw.ellipse(
-                [x_pos + 16, y_pos + 15, x_pos + 23, y_pos + 22],
+                [x_pos + 14, y_pos + 14, x_pos + 20, y_pos + 20],
                 fill=COLOR_CYAN,
             )
 
-            clean_t = textwrap.shorten(title, width=46, placeholder="...")
-            title_lines = textwrap.wrap(clean_t, width=30)
+            title_lines = textwrap.wrap(title, width=34)
 
-            y_title_cursor = y_pos + 8
-            for t_line in title_lines[:2]:
-                draw.text(
-                    (x_pos + 32, y_title_cursor),
-                    t_line,
-                    font=font_tile_title,
-                    fill=COLOR_TEXT_WHITE,
-                )
-                y_title_cursor += 19
-
-            if desc:
-                clean_d = textwrap.shorten(desc, width=64, placeholder="...")
-                desc_lines = textwrap.wrap(clean_d, width=34)
-                y_desc = max(y_title_cursor + 2, y_pos + 44)
-                for l in desc_lines[:2]:
+            # Center title vertically if no description is provided
+            if not desc:
+                total_title_h = len(title_lines[:2]) * 18
+                y_title_cursor = y_pos + max(8, (box_h - total_title_h) // 2)
+                for t_line in title_lines[:2]:
                     draw.text(
-                        (x_pos + 32, y_desc),
+                        (x_pos + 28, y_title_cursor),
+                        t_line,
+                        font=font_tile_title,
+                        fill=COLOR_TEXT_WHITE,
+                    )
+                    y_title_cursor += 18
+            else:
+                y_title_cursor = y_pos + 8
+                for t_line in title_lines[:2]:
+                    draw.text(
+                        (x_pos + 28, y_title_cursor),
+                        t_line,
+                        font=font_tile_title,
+                        fill=COLOR_TEXT_WHITE,
+                    )
+                    y_title_cursor += 18
+
+                desc_lines = textwrap.wrap(desc, width=36)
+                y_desc = max(y_title_cursor + 2, y_pos + (30 if len(title_lines) == 1 else 46))
+                
+                max_lines = 3 if len(title_lines) == 1 else 2
+                for l in desc_lines[:max_lines]:
+                    draw.text(
+                        (x_pos + 28, y_desc),
                         l,
                         font=font_tile_desc,
                         fill=COLOR_TEXT_BODY,
                     )
-                    y_desc += 17
+                    y_desc += 16
 
     img.save(output_path, "PNG")
 
