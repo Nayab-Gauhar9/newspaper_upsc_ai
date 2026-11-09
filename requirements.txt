@@ -58,3 +58,4 @@ cryptography==50.0.2
 pycryptodome==3.23.0
 
 razorpay>=1.4.1
+greenlet>=3.0.0
