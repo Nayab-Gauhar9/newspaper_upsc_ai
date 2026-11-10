@@ -2,6 +2,7 @@ import os
 import re
 import textwrap
 import tempfile
+from typing import Any
 from sqlalchemy.orm import Session
 
 from src.database.models import ConstitutionalArticleModel, SocialCampaignQueue
@@ -16,9 +17,11 @@ from src.services.pib_social_slide_renderer import (
 )
 
 
-def clean_unicode_for_pillow(text: str) -> str:
+def clean_unicode_for_pillow(text: Any) -> str:
     if not text:
         return ""
+    if not isinstance(text, str):
+        text = str(text)
     replacements = {
         "₹": "Rs. ",
         "\u202f": " ",
@@ -35,6 +38,17 @@ def clean_unicode_for_pillow(text: str) -> str:
     for old, new in replacements.items():
         text = text.replace(old, new)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def coerce_linkage_to_str(link_item: Any) -> str:
+    """Safely extracts title and description whether linkage is a dict or string."""
+    if isinstance(link_item, dict):
+        title = link_item.get("title", "").strip()
+        desc = link_item.get("description", "").strip() or link_item.get("desc", "").strip()
+        if title and desc:
+            return f"{title} – {desc}"
+        return title or desc
+    return str(link_item or "")
 
 
 def sanitize_topic_badge(topic_label: str) -> str:
@@ -64,7 +78,6 @@ def clean_linkage_title(raw_link: str) -> tuple[str, str]:
     if not title:
         title = text.strip(" '\"")
 
-    # If desc is empty but title ends with parenthetical info, extract it into desc
     if not desc and "(" in title and title.endswith(")"):
         m = re.match(r"^(.*?)\s*\((.*?)\)$", title)
         if m:
@@ -96,7 +109,6 @@ def build_slides_from_pib_note(
 
     summary_raw = clean_unicode_for_pillow(note_data.get("summary", ""))
 
-    # Robust sentence extraction: avoids splitting on month abbreviations (Jan., Oct., Nov.)
     clean_summary_for_split = re.sub(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.\s*", r"\1 ", summary_raw)
     sentences = re.split(r"(?<=[a-zA-Z0-9\)])[.!?]\s+", clean_summary_for_split)
     
@@ -108,7 +120,7 @@ def build_slides_from_pib_note(
         core_hook = textwrap.shorten(summary_raw, width=180, placeholder="...")
 
     raw_linkages = [
-        clean_unicode_for_pillow(x)
+        clean_unicode_for_pillow(coerce_linkage_to_str(x))
         for x in note_data.get("backward_linkages", [])
     ]
     filtered_linkages = []
@@ -196,13 +208,15 @@ def build_slides_from_pib_note(
     }
 
     # -------------------------------------------------------------------------
-    # 5. Slide 5 (100% Dynamic Prelims Traps & Mains Question)
+    # 5. Slide 5 (Dynamic Prelims Traps & Mains Question)
     # -------------------------------------------------------------------------
     practice_points = note_data.get("prelims_practice_points", [])
     rows = []
     
     for idx, pt in enumerate(practice_points[:2], 1):
-        stmt = clean_unicode_for_pillow(pt.get("statement", ""))
+        if not isinstance(pt, dict):
+            continue
+        stmt = clean_unicode_for_pillow(pt.get("statement", "") or pt.get("rule", ""))
         expl = clean_unicode_for_pillow(pt.get("explanation", ""))
         trap_val = clean_unicode_for_pillow(pt.get("trap", ""))
 
@@ -330,7 +344,7 @@ def generate_campaign_for_latest_pib(db: Session) -> SocialCampaignQueue:
 
     headline = note_data.get("headline", "PIB Constitutional Dossier")
     raw_linkages = [
-        clean_unicode_for_pillow(x)
+        clean_unicode_for_pillow(coerce_linkage_to_str(x))
         for x in note_data.get("backward_linkages", [])
     ]
     top_linkages = [
