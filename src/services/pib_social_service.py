@@ -216,17 +216,39 @@ def build_slides_from_pib_note(
     for idx, pt in enumerate(practice_points[:2], 1):
         if not isinstance(pt, dict):
             continue
-        stmt = clean_unicode_for_pillow(pt.get("statement", "") or pt.get("rule", ""))
-        expl = clean_unicode_for_pillow(pt.get("explanation", ""))
-        trap_val = clean_unicode_for_pillow(pt.get("trap", ""))
 
-        rule_text = expl if expl else stmt
+        rule_val = clean_unicode_for_pillow(pt.get("rule", ""))
+        expl_val = clean_unicode_for_pillow(pt.get("explanation", ""))
+        stmt_val = clean_unicode_for_pillow(pt.get("statement", ""))
+        trap_val = clean_unicode_for_pillow(pt.get("trap", ""))
+        is_correct = pt.get("is_correct")
+
+        # Establish authentic Rule
+        if rule_val:
+            rule_text = rule_val
+        elif is_correct is True and stmt_val:
+            rule_text = stmt_val
+        elif expl_val:
+            rule_text = expl_val
+        else:
+            rule_text = stmt_val
+
+        # Establish authentic Trap
         if trap_val:
             trap_text = trap_val
-        elif pt.get("is_correct") is False:
-            trap_text = stmt
+        elif is_correct is False and stmt_val and stmt_val != rule_text:
+            trap_text = stmt_val
         else:
-            trap_text = f"Assuming provision is absolute or without statutory limitations: {stmt}"
+            trap_text = f"Assuming provision is absolute or operates without statutory conditions: {stmt_val or rule_text}"
+
+        # Deduplication Guard: Never allow Rule and Trap to be identical
+        if rule_text.strip().lower() == trap_text.strip().lower():
+            if expl_val and expl_val.strip().lower() != rule_text.strip().lower():
+                rule_text = expl_val
+            elif is_correct is False and stmt_val:
+                trap_text = f"Confusing the standard rule with the distractor: {stmt_val}"
+            else:
+                trap_text = "Misidentifying statutory jurisdiction or procedural mandate under the relevant act."
 
         rows.append({
             "param": f"Prelims Fact #{idx}",

@@ -14,6 +14,7 @@ from src.api.blueprint import router as blueprint_router
 from src.api.social_cockpit import router as social_router
 from fastapi.staticfiles import StaticFiles
 from src.api.payments import router as payments_router
+from src.api.campaign_tracker import router as tracker_router
 
 app = FastAPI(
     title="UPSC Polity Living Dossiers API",
@@ -45,6 +46,7 @@ app.include_router(reports_router)
 app.include_router(blueprint_router)
 app.include_router(social_router)
 app.include_router(payments_router)
+app.include_router(tracker_router)
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
