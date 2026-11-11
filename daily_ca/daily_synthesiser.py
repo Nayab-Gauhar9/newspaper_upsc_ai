@@ -1,19 +1,21 @@
 import os
 import time
 import json
+import logging
 from typing import Optional, List, Dict
 from dotenv import load_dotenv
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from groq import Groq, RateLimitError
 
 from src.storage.minio_client import NewspaperStorage
 from src.classifiers.editorial_classifier import KeyRotator, countdown_sleep
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# 1. 6-LAYER PHD / UPSC EXPERT SCHEMA
+# 1. 6-LAYER PHD / UPSC EXPERT SCHEMA (STRICTLY PRESERVED)
 # ==============================================================================
 
 class DialecticalDimension(BaseModel):
@@ -24,7 +26,7 @@ class DialecticalDimension(BaseModel):
 class PrelimsTrapStatement(BaseModel):
     statement: str = Field(description="Rigorous Prelims statement crafted with a classic UPSC conceptual trap.")
     is_correct: bool = Field(description="True or False.")
-    trap_mechanism: str = Field(description="Classification of trap: 'Constitutional vs Statutory', 'Shall vs May', 'Absolute vs Qualified', etc.")
+    trap_mechanism: str = Field(description="Classification of trap: 'Constitutional vs Statutory', 'Shall vs May', 'Absolute vs Qualified', 'Central Sector vs Centrally Sponsored', 'Union vs State List'")
     explanation: str = Field(description="Authoritative legal rationale citing constitutional text, doctrine, or statutory section.")
 
 class BackwardLinkages(BaseModel):
@@ -53,59 +55,87 @@ class PhDLevelPolityAnalysis(BaseModel):
 
 
 # ==============================================================================
-# 2. SYSTEM & USER PROMPTS (EXPLICIT JSON CONTRACT)
+# 2. HARDENED SYSTEM & USER PROMPTS
 # ==============================================================================
 
 SCHEMA_TEMPLATE_STR = """{
-  "headline": "<academic structural headline>",
-  "chapter_name": "<exact Laxmikanth chapter title>",
-  "issue_framing": "<concise 80-word academic overview of constitutional dilemma>",
+  "headline": "<High-level academic headline highlighting institutional or constitutional tension>",
+  "chapter_name": "<Exact Laxmikanth chapter title>",
+  "issue_framing": "<Strictly 70-90 words synthesizing the institutional dilemma, statutory conflict, or constitutional friction>",
   "backward_linkages": {
-    "articles_and_schedules": ["Article ...", "Schedule ..."],
-    "landmark_judgments": ["Case vs State ..."],
-    "commissions_and_committees": ["Sarkaria / Punchhi / 2nd ARC / Law Commission ..."],
-    "constitutional_doctrines": ["Doctrine of ..."]
+    "articles_and_schedules": ["Article ...", "Schedule ... (List I/II/III Entry ...)"],
+    "landmark_judgments": ["Case Name v. Union of India (Year)"],
+    "commissions_and_committees": ["Sarkaria Commission / Punchhi Commission / 2nd ARC / Law Commission Report No. ..."],
+    "constitutional_doctrines": ["Doctrine of Pith and Substance / Basic Structure / Harmonious Construction / Colorable Legislation"]
   },
   "thesis_affirmative": [
     {
-      "dimension": "<dimension name>",
-      "argument": "<scholarly argument using precise constitutional terminology>",
-      "substantiation": "<precedent or constitutional text>"
+      "dimension": "<Exact constitutional or administrative dimension name>",
+      "argument": "<Scholarly argument with formal jurisprudence terms>",
+      "substantiation": "<Specific Article, precedent, or statutory provision>"
+    },
+    {
+      "dimension": "<Second constitutional dimension name>",
+      "argument": "<Scholarly argument with formal jurisprudence terms>",
+      "substantiation": "<Specific Article, precedent, or statutory provision>"
     }
   ],
   "antithesis_critique": [
     {
-      "dimension": "<dimension name>",
-      "argument": "<scholarly critique>",
-      "substantiation": "<precedent or doctrine violated>"
+      "dimension": "<Exact vulnerability dimension name>",
+      "argument": "<Rigorous critique focusing on institutional decay or rights violation>",
+      "substantiation": "<Precedent, DPSP conflict, or federal safeguard violated>"
+    },
+    {
+      "dimension": "<Second vulnerability dimension name>",
+      "argument": "<Rigorous critique focusing on institutional decay or rights violation>",
+      "substantiation": "<Precedent, DPSP conflict, or federal safeguard violated>"
     }
   ],
-  "edge_case_and_unintended_consequences": "<subtle paradox, administrative second-order effect, or institutional loophole>",
+  "edge_case_and_unintended_consequences": "<2 to 3 sentences detailing subtle institutional paradoxes, jurisdictional overlap, or unintended enforcement dilemmas>",
   "prelims_edge_traps": [
     {
-      "statement": "<UPSC trap statement>",
+      "statement": "<Deceptive statement testing subtle wordings: e.g. statutory vs constitutional, 100% central funding vs 60:40>",
+      "is_correct": false,
+      "trap_mechanism": "<Constitutional vs Statutory / Shall vs May / Absolute vs Qualified / Central Sector vs CSS / Legislative Competence>",
+      "explanation": "<Precise legal rationale stating why it is false, citing the exact statutory section or constitutional provision>"
+    },
+    {
+      "statement": "<Factually accurate, nuanced statement testing a non-obvious constitutional safeguard>",
       "is_correct": true,
-      "trap_mechanism": "<Constitutional vs Statutory / Shall vs May / Absolute vs Qualified>",
-      "explanation": "<exact legal wording explanation>"
+      "trap_mechanism": "<Constitutional Safeguard / Procedural Prerequisite / Statutory Qualification>",
+      "explanation": "<Affirmation citing the exact constitutional article or benchmark judgment>"
+    },
+    {
+      "statement": "<Deceptive statement manufacturing an arbitrary numerical requirement or incorrect Union vs State ministry attribution>",
+      "is_correct": false,
+      "trap_mechanism": "<Ministry Attribution / Numerical Constraint / Mandatory vs Discretionary>",
+      "explanation": "<Precise legal rationale stating why it is false>"
     }
   ],
   "mains_framework": {
-    "mains_probable_question": "<15 Marks 250 Words Mains Question>",
-    "introduction_hook": "<context, doctrine, or article to open with>",
-    "body_architecture": "<subheadings and analytical balance required>",
-    "way_forward_and_reforms": "<concrete institutional remedies>"
+    "mains_probable_question": "<High-probability 15 Marks, 250 Words question starting with 'Critically examine', 'Evaluate', or 'Discuss'>",
+    "introduction_hook": "<1-2 sentences framing the answer with an Article, Supreme Court doctrine, or institutional context>",
+    "body_architecture": "<Clear breakdown of sub-headings: Affirmative Justification, Constitutional Friction/Critique, Federal/Institutional Implications>",
+    "way_forward_and_reforms": "<Concrete actionable reforms citing Law Commission, ARC, or landmark committee recommendations>"
   },
-  "aspirant_blindspot": "<What standard aspirants write vs What an expert writes>"
+  "aspirant_blindspot": "Standard Aspirant writes: [descriptive narrative or current events summary]. Expert Examination Candidate writes: [dialectical analysis balancing Articles, Seventh Schedule entries, and ratio decidendi of landmark rulings]."
 }"""
 
 EXPERT_POLITY_SYSTEM_PROMPT = f"""You are a distinguished Constitutional Scholar, UPSC CSE GS-II Chief Examiner, and Senior Legal Arbiter.
-Analyze legal, constitutional, and governance developments with PhD-level analytical depth.
+Your objective is to deconstruct daily news developments into authoritative, PhD-level UPSC General Studies Paper II analytical frameworks.
 
-You must output STRICTLY valid JSON conforming EXACTLY to this JSON structure:
-{SCHEMA_TEMPLATE_STR}
-Do NOT rename, alter, or omit any of the top-level keys."""
+CRITICAL INSTRUCTIONS & NEGATIVE CONSTRAINTS:
+1. OUTPUT FORMAT: Output ONLY a single, valid, parsable JSON object. No preamble, no markdown fences, no conversational prose.
+2. SCHEMA STRICTNESS: You must match the key names and nesting in the JSON template below exactly. Do NOT rename, delete, or introduce new top-level keys.
+3. CONSTITUTIONAL GROUNDING: Always specify exact Article numbers, Seventh Schedule Entries (List I/II/III), landmark Supreme Court rulings, and administrative bodies. Avoid vague assertions like "the constitution states".
+4. PRELIMS TRAPS: Statements must feature realistic UPSC exam traps (e.g., swapping Central Sector vs Centrally Sponsored, confusing Article 66 with 54, or misattributing State subjects like public health to the Union). Include explicit 'is_correct' booleans.
+5. NO TRUNCATION: Complete all arrays with the requested counts (thesis_affirmative: 2, antithesis_critique: 2, prelims_edge_traps: 3).
 
-ANALYSIS_USER_PROMPT_TEMPLATE = """Evaluate this article under the Indian Polity syllabus:
+JSON SCHEMA TEMPLATE:
+{SCHEMA_TEMPLATE_STR}"""
+
+ANALYSIS_USER_PROMPT_TEMPLATE = """Evaluate this news article under the Indian Polity and Governance (UPSC GS-II) syllabus:
 CHAPTER: {chapter_name} (Laxmikanth 8th Edition)
 PUBLICATION: {publication} | CATEGORY: {category}
 ARTICLE TITLE: {title}
@@ -114,7 +144,7 @@ RAW ARTICLE TEXT:
 {article_text}
 
 Output strictly valid JSON matching the exact schema provided in the system prompt.
-Do not invent alternate key names like 'structural_tensions'."""
+Do not wrap in backticks or markdown fences."""
 
 
 # ==============================================================================
@@ -151,20 +181,20 @@ class DailyPolitySynthesizer:
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.1
-
                 )
-                return PhDLevelPolityAnalysis.model_validate_json(completion.choices[0].message.content)
+                raw_json = completion.choices[0].message.content
+                return PhDLevelPolityAnalysis.model_validate_json(raw_json)
             except RateLimitError:
                 attempts += 1
-                print(f"\n    [!] Rate limited on key {key_preview}. Rotating immediately to next key...")
+                logger.warning(f"Rate limited on key {key_preview}. Rotating immediately...")
                 time.sleep(1.0)
             except Exception as e:
                 attempts += 1
-                print(f"    [!] Error on key {key_preview}: {e}. Retrying next key...")
+                logger.warning(f"Error on key {key_preview}: {e}. Retrying next key...")
                 time.sleep(1.0)
 
         # Fallback pause if all keys are temporarily rate-limited
-        print("    [!] All Groq keys rate-limited. Pausing 15s...")
+        logger.warning("All Groq keys rate-limited. Pausing 15s...")
         time.sleep(15.0)
         _, client = self.rotator.get_next_client()
         completion = client.chat.completions.create(
@@ -184,17 +214,11 @@ class DailyPolitySynthesizer:
         limit: Optional[int] = None,
         cooldown_seconds: int = 4
     ):
-        """
-        Discovers articles in daily_press/.../classified/, executes synthesis, and dual-writes to:
-        1. daily_press/{pub}/{date}/{cat}/smart_notes/smart_notes_{article_id}.json
-        2. newspaper/smart_notes/{chapter_name}/smart_notes_{article_id}.json (for dossiers sync)
-        """
         print("=" * 80)
         print("STARTING PHD-LEVEL POLITY SMART NOTE SYNTHESIZER")
         print(f"Bucket: {self.storage.bucket} | Model: {self.model} | Pacing: {cooldown_seconds}s")
         print("=" * 80)
 
-        # 1. Discover all classified articles across daily_press/
         all_objects = self.storage.list_objects(prefix="daily_press/")
         classified_keys = [
             k for k in all_objects
@@ -207,7 +231,6 @@ class DailyPolitySynthesizer:
         classified_keys.sort()
         print(f"Discovered {len(classified_keys)} classified articles in MinIO.")
 
-        # 2. Idempotency Check: Filter out already synthesized notes
         unprocessed_keys = []
         for c_key in classified_keys:
             smart_note_key = c_key.replace("/classified/", "/smart_notes/").replace(".json", "")
@@ -219,7 +242,6 @@ class DailyPolitySynthesizer:
                 unprocessed_keys.append(c_key)
 
         print(f"Articles pending smart note synthesis: {len(unprocessed_keys)}\n")
-
         synthesized = 0
 
         for c_key in unprocessed_keys:
@@ -240,20 +262,13 @@ class DailyPolitySynthesizer:
             classification = payload.get("classification", {})
             chapter_name = classification.get("chapter_name") or "Constitutional Framework"
 
-            # Destination keys
             daily_smart_note_key = f"daily_press/{pub}/{iso_date}/{cat}/smart_notes/smart_notes_{article_id}.json"
-            dossier_smart_note_key = f"newspaper/smart_notes/{chapter_name}/smart_notes_{article_id}.json"
 
-# Double-check idempotency
             if self.storage.object_exists(daily_smart_note_key):
-                print(f"[-] Already synthesized: {article_id}. Skipping.")
                 continue
 
             print(f"\n[{iso_date}] Synthesizing: {title[:55]}... ({pub}/{cat})")
-            print(f"     Chapter: {chapter_name}")
-
             try:
-                # 3. Generate Analysis via LLM
                 intel = self.synthesize_analysis(
                     chapter_name=chapter_name,
                     pub=pub,
@@ -262,7 +277,6 @@ class DailyPolitySynthesizer:
                     text=text
                 )
 
-                # 4. Assemble Storage Payload
                 smart_note_payload = {
                     "article_id": article_id,
                     "publication": pub,
@@ -276,11 +290,8 @@ class DailyPolitySynthesizer:
                     **intel.model_dump(),
                 }
 
-                # 5. Dual-Write
-                # A: Daily Press Path (Website Feed & Compilations)
                 self.storage.put_json(daily_smart_note_key, smart_note_payload)
                 print(f"     [✓ SAVED FEED] -> {daily_smart_note_key}")
-
                 synthesized += 1
 
                 if cooldown_seconds > 0:
@@ -292,7 +303,6 @@ class DailyPolitySynthesizer:
         print("\n" + "=" * 80)
         print("SMART NOTE SYNTHESIS RUN COMPLETE")
         print(f"Newly Synthesized : {synthesized}")
-        print(f"Already Existed   : {len(classified_keys) - len(unprocessed_keys)}")
         print("=" * 80)
 
 
